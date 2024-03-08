@@ -21,7 +21,7 @@ impl RustMigration for PolicyTrustContextId {
         Self::version()
     }
 
-    async fn migrate(&self, connection: &mut SqliteConnection) -> Result<bool> {
+    async fn migrate(&self, connection: &mut AnyConnection) -> Result<bool> {
         Self::migrate_update_policies(connection).await
     }
 }
@@ -39,7 +39,7 @@ impl PolicyTrustContextId {
 
     /// This migration updates policies to not rely on trust_context_id,
     /// also introduces `node_name` and  replicates policy for each existing node
-    pub(crate) async fn migrate_update_policies(connection: &mut SqliteConnection) -> Result<bool> {
+    pub(crate) async fn migrate_update_policies(connection: &mut AnyConnection) -> Result<bool> {
         let mut transaction = sqlx::Connection::begin(&mut *connection)
             .await
             .into_core()?;
@@ -194,8 +194,8 @@ struct PolicyRow {
 mod test {
     use crate::database::migrations::node_migration_set::NodeMigrationSet;
     use crate::database::{MigrationSet, SqlxDatabase};
+    use sqlx::any::AnyArguments;
     use sqlx::query::Query;
-    use sqlx::sqlite::SqliteArguments;
     use tempfile::NamedTempFile;
 
     use super::*;
@@ -304,14 +304,14 @@ mod test {
         resource: String,
         action: String,
         expression: Vec<u8>,
-    ) -> Query<'static, Sqlite, SqliteArguments<'static>> {
+    ) -> Query<'static, Any, AnyArguments<'static>> {
         query("INSERT INTO policy_old (resource, action, expression) VALUES (?, ?, ?)")
             .bind(resource.to_sql())
             .bind(action.to_sql())
             .bind(expression.to_sql())
     }
 
-    fn insert_node(name: String) -> Query<'static, Sqlite, SqliteArguments<'static>> {
+    fn insert_node(name: String) -> Query<'static, Any, AnyArguments<'static>> {
         query("INSERT INTO node (name, identifier, verbosity, is_default, is_authority) VALUES (?, ?, ?, ?, ?)")
             .bind(name.to_sql())
             .bind("I_TEST".to_string().to_sql())

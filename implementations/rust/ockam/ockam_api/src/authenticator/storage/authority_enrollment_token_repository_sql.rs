@@ -12,7 +12,7 @@ use crate::authenticator::{
 };
 
 /// Implementation of [`AuthorityEnrollmentTokenRepository`] trait based on an underlying database
-/// using sqlx as its API, and Sqlite as its driver
+/// using sqlx as its API
 #[derive(Clone)]
 pub struct AuthorityEnrollmentTokenSqlxDatabase {
     database: SqlxDatabase,

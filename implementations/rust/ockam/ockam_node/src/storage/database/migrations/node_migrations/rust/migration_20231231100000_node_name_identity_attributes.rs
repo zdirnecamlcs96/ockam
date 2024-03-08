@@ -1,6 +1,6 @@
 use crate::database::{FromSqlxError, RustMigration, ToSqlxType, ToVoid};
 use ockam_core::{async_trait, Result};
-use sqlx::sqlite::SqliteRow;
+use sqlx::any::AnyRow;
 use sqlx::*;
 
 /// This struct adds a node name column to the identity attributes table
@@ -17,7 +17,7 @@ impl RustMigration for NodeNameIdentityAttributes {
         Self::version()
     }
 
-    async fn migrate(&self, connection: &mut SqliteConnection) -> Result<bool> {
+    async fn migrate(&self, connection: &mut AnyConnection) -> Result<bool> {
         Self::migrate_attributes_node_name(connection).await
     }
 }
@@ -39,15 +39,23 @@ impl NodeNameIdentityAttributes {
 
     /// Duplicate all attributes entry for every known node
     pub(crate) async fn migrate_attributes_node_name(
-        connection: &mut SqliteConnection,
+        connection: &mut AnyConnection,
     ) -> Result<bool> {
         // don't run the migration twice
-        let data_migration_needed: Option<SqliteRow> =
+        let data_migration_needed: Option<AnyRow> =
             query(&Self::table_exists("identity_attributes_old"))
                 .fetch_optional(&mut *connection)
                 .await
                 .into_core()?;
-        let data_migration_needed = data_migration_needed.map(|r| r.get(0)).unwrap_or(false);
+        let data_migration_needed = data_migration_needed
+            .map(|r| {
+                if r.get::<i64, usize>(0) == 0 {
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
 
         if !data_migration_needed {
             // Trigger marking as migrated
@@ -113,8 +121,8 @@ struct NodeNameRow {
 mod test {
     use crate::database::migrations::node_migration_set::NodeMigrationSet;
     use crate::database::{MigrationSet, SqlxDatabase};
+    use sqlx::any::AnyArguments;
     use sqlx::query::Query;
-    use sqlx::sqlite::SqliteArguments;
     use std::collections::BTreeMap;
     use tempfile::NamedTempFile;
 
@@ -189,7 +197,7 @@ mod test {
         ]))?)
     }
 
-    fn insert_query(identifier: &str, attributes: Vec<u8>) -> Query<Sqlite, SqliteArguments> {
+    fn insert_query(identifier: &str, attributes: Vec<u8>) -> Query<Any, AnyArguments> {
         query("INSERT INTO identity_attributes_old VALUES (?, ?, ?, ?, ?)")
             .bind(identifier.to_sql())
             .bind(attributes.to_sql())
@@ -198,7 +206,7 @@ mod test {
             .bind(Some("authority").map(|e| e.to_sql()))
     }
 
-    fn insert_node(name: String) -> Query<'static, Sqlite, SqliteArguments<'static>> {
+    fn insert_node(name: String) -> Query<'static, Any, AnyArguments<'static>> {
         query("INSERT INTO node (name, identifier, verbosity, is_default, is_authority) VALUES (?, ?, ?, ?, ?)")
             .bind(name.to_sql())
             .bind("I_TEST".to_string().to_sql())

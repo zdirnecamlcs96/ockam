@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use sqlx::sqlite::SqliteRow;
+use sqlx::any::AnyRow;
 use sqlx::FromRow;
 use sqlx::*;
 use time::OffsetDateTime;
@@ -96,7 +96,7 @@ impl EnrollmentsRepository for EnrollmentsSqlxDatabase {
             "#,
         )
         .bind(true.to_sql());
-        let result: Option<SqliteRow> = query
+        let result: Option<AnyRow> = query
             .fetch_optional(&*self.database.pool)
             .await
             .into_core()?;
@@ -118,7 +118,7 @@ impl EnrollmentsRepository for EnrollmentsSqlxDatabase {
             "#,
         )
         .bind(name.to_sql());
-        let result: Option<SqliteRow> = query
+        let result: Option<AnyRow> = query
             .fetch_optional(&*self.database.pool)
             .await
             .into_core()?;

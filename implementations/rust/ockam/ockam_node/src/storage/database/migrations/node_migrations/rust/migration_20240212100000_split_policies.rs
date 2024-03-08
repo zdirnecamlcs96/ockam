@@ -18,7 +18,7 @@ impl RustMigration for SplitPolicies {
         Self::version()
     }
 
-    async fn migrate(&self, connection: &mut SqliteConnection) -> Result<bool> {
+    async fn migrate(&self, connection: &mut AnyConnection) -> Result<bool> {
         Self::migrate_policies(connection).await
     }
 }
@@ -34,7 +34,7 @@ impl SplitPolicies {
         "migration_20240212100000_migrate_policies"
     }
 
-    pub(crate) async fn migrate_policies(connection: &mut SqliteConnection) -> Result<bool> {
+    pub(crate) async fn migrate_policies(connection: &mut AnyConnection) -> Result<bool> {
         let mut transaction = sqlx::Connection::begin(&mut *connection)
             .await
             .into_core()?;
@@ -86,8 +86,8 @@ mod test {
     use crate::database::migrations::node_migration_set::NodeMigrationSet;
     use crate::database::{MigrationSet, SqlxDatabase};
     use ockam_core::compat::rand::random_string;
+    use sqlx::any::AnyArguments;
     use sqlx::query::Query;
-    use sqlx::sqlite::SqliteArguments;
     use tempfile::NamedTempFile;
 
     use super::*;
@@ -170,7 +170,7 @@ mod test {
     }
 
     /// HELPERS
-    fn insert_policy(resource: &str) -> Query<'static, Sqlite, SqliteArguments<'static>> {
+    fn insert_policy(resource: &str) -> Query<Any, AnyArguments> {
         let action = "handle_message";
         let expression = random_string();
         let node_name = random_string();

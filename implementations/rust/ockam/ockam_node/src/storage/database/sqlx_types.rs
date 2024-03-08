@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use ockam_core::Address;
 use sqlx::database::HasArguments;
 use sqlx::encode::IsNull;
-use sqlx::{Database, Encode, Sqlite, Type};
+use sqlx::{Any, Database, Encode, Type};
 use time::OffsetDateTime;
 
-/// This enum represents the set of types that we currently support in our database
-/// Since we support only Sqlite at the moment, those types are close to what is supported by Sqlite:
+/// This enum represents the set of types that we currently support in our database.
+/// We support the types which Sqlite uses:
 /// https://www.sqlite.org/datatype3.html
 ///
 /// The purpose of this type is to ease the serialization of data types in Ockam into data types in
@@ -30,32 +30,32 @@ pub enum SqlxType {
     Real(f64),
 }
 
-/// The SqlxType implements the Type<Sqlite> trait from sqlx to allow its values to be serialized
-/// to an Sqlite database
-impl Type<Sqlite> for SqlxType {
-    fn type_info() -> <Sqlite as Database>::TypeInfo {
-        <Vec<u8> as Type<Sqlite>>::type_info()
+/// The SqlxType implements the Type<Any> trait from sqlx to allow its values to be serialized
+/// to any database
+impl Type<Any> for SqlxType {
+    fn type_info() -> <Any as Database>::TypeInfo {
+        <Vec<u8> as Type<Any>>::type_info()
     }
 }
 
-/// The SqlType implements the Encode<Sqlite> trait from sqlx to allow its values to be serialized
-/// to an Sqlite database. There is a 1 to 1 mapping with the database native types
-impl Encode<'_, Sqlite> for SqlxType {
-    fn encode_by_ref(&self, buf: &mut <Sqlite as HasArguments>::ArgumentBuffer) -> IsNull {
+/// The SqlType implements the Encode<Any> trait from sqlx to allow its values to be serialized
+/// to any database. There is a 1 to 1 mapping with the database native types
+impl Encode<'_, Any> for SqlxType {
+    fn encode_by_ref(&self, buf: &mut <Any as HasArguments>::ArgumentBuffer) -> IsNull {
         match self {
-            SqlxType::Text(v) => <String as Encode<'_, Sqlite>>::encode_by_ref(v, buf),
-            SqlxType::Blob(v) => <Vec<u8> as Encode<'_, Sqlite>>::encode_by_ref(v, buf),
-            SqlxType::Integer(v) => <i64 as Encode<'_, Sqlite>>::encode_by_ref(v, buf),
-            SqlxType::Real(v) => <f64 as Encode<'_, Sqlite>>::encode_by_ref(v, buf),
+            SqlxType::Text(v) => <String as Encode<'_, Any>>::encode_by_ref(v, buf),
+            SqlxType::Blob(v) => <Vec<u8> as Encode<'_, Any>>::encode_by_ref(v, buf),
+            SqlxType::Integer(v) => <i64 as Encode<'_, Any>>::encode_by_ref(v, buf),
+            SqlxType::Real(v) => <f64 as Encode<'_, Any>>::encode_by_ref(v, buf),
         }
     }
 
-    fn produces(&self) -> Option<<Sqlite as Database>::TypeInfo> {
+    fn produces(&self) -> Option<<Any as Database>::TypeInfo> {
         Some(match self {
-            SqlxType::Text(_) => <String as Type<Sqlite>>::type_info(),
-            SqlxType::Blob(_) => <Vec<u8> as Type<Sqlite>>::type_info(),
-            SqlxType::Integer(_) => <i64 as Type<Sqlite>>::type_info(),
-            SqlxType::Real(_) => <f64 as Type<Sqlite>>::type_info(),
+            SqlxType::Text(_) => <String as Type<Any>>::type_info(),
+            SqlxType::Blob(_) => <Vec<u8> as Type<Any>>::type_info(),
+            SqlxType::Integer(_) => <i64 as Type<Any>>::type_info(),
+            SqlxType::Real(_) => <f64 as Type<Any>>::type_info(),
         })
     }
 }
@@ -73,7 +73,7 @@ impl Encode<'_, Sqlite> for SqlxType {
 /// struct TimestampInSeconds(u64);
 ///
 /// // this implementation maps the TimestampInSecond type to one of the types that Sqlx
-/// // can serialize for sqlite
+/// // can serialize for any database
 /// impl ToSqlxType for TimestampInSeconds {
 ///     fn to_sql(&self) -> SqlxType {
 ///         self.0.to_sql()

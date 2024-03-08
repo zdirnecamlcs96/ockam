@@ -1,4 +1,4 @@
-use sqlx::sqlite::SqliteRow;
+use sqlx::any::AnyRow;
 use sqlx::*;
 
 use ockam_core::async_trait;
@@ -61,7 +61,7 @@ impl SpacesRepository for SpacesSqlxDatabase {
 
     async fn get_space(&self, space_id: &str) -> Result<Option<Space>> {
         let query = query("SELECT space_name FROM space WHERE space_id=$1").bind(space_id.to_sql());
-        let row: Option<SqliteRow> = query
+        let row: Option<AnyRow> = query
             .fetch_optional(&*self.database.pool)
             .await
             .into_core()?;
@@ -119,7 +119,7 @@ impl SpacesRepository for SpacesSqlxDatabase {
 
     async fn get_default_space(&self) -> Result<Option<Space>> {
         let query = query("SELECT space_name FROM space WHERE is_default=$1").bind(true.to_sql());
-        let row: Option<SqliteRow> = query
+        let row: Option<AnyRow> = query
             .fetch_optional(&*self.database.pool)
             .await
             .into_core()?;

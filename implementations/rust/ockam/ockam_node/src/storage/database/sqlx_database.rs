@@ -1,11 +1,12 @@
 use core::fmt::{Debug, Formatter};
-use sqlx::pool::PoolOptions;
-use sqlx::sqlite::SqliteConnectOptions;
+use core::str::FromStr;
 use std::ops::Deref;
 use std::path::Path;
 
 use ockam_core::errcode::{Kind, Origin};
-use sqlx::{ConnectOptions, SqlitePool};
+use sqlx::any::{AnyConnectOptions, install_default_drivers};
+use sqlx::pool::PoolOptions;
+use sqlx::{Any, ConnectOptions, Pool};
 use tokio_retry::strategy::{jitter, FixedInterval};
 use tokio_retry::Retry;
 use tracing::debug;
@@ -26,7 +27,7 @@ use ockam_core::{Error, Result};
 #[derive(Clone)]
 pub struct SqlxDatabase {
     /// Pool of connections to the database
-    pub pool: Arc<SqlitePool>,
+    pub pool: Arc<Pool<Any>>,
     /// Node name to isolate data between nodes where needed
     pub node_name: Option<String>,
 }
@@ -38,7 +39,7 @@ impl Debug for SqlxDatabase {
 }
 
 impl Deref for SqlxDatabase {
-    type Target = SqlitePool;
+    type Target = Pool<Any>;
 
     fn deref(&self) -> &Self::Target {
         &self.pool
@@ -139,18 +140,24 @@ impl SqlxDatabase {
         })
     }
 
-    pub(crate) async fn create_connection_pool(path: &Path) -> Result<SqlitePool> {
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
+    pub(crate) async fn create_connection_pool(path: &Path) -> Result<Pool<Any>> {
+        install_default_drivers();
+        let url_string = &path.as_os_str().to_str().ok_or(Error::new(
+            Origin::Api,
+            Kind::Invalid,
+            format!("incorrect database url {path:?}"),
+        ))?;
+        let options = AnyConnectOptions::from_str(url_string)
+            .map_err(Self::map_sql_err)?
             .log_statements(LevelFilter::Debug);
-        let pool = SqlitePool::connect_with(options)
+        let pool = Pool::connect_with(options)
             .await
             .map_err(Self::map_sql_err)?;
         Ok(pool)
     }
 
-    pub(crate) async fn create_in_memory_connection_pool() -> Result<SqlitePool> {
+    pub(crate) async fn create_in_memory_connection_pool() -> Result<Pool<Any>> {
+        install_default_drivers();
         // SQLite in-memory DB get wiped if there is no connection to it.
         // The below setting tries to ensure there is always an open connection
         let pool_options = PoolOptions::new().idle_timeout(None).max_lifetime(None);
@@ -239,7 +246,7 @@ impl<T> ToVoid<T> for core::result::Result<T, sqlx::error::Error> {
 
 #[cfg(test)]
 mod tests {
-    use sqlx::sqlite::SqliteQueryResult;
+    use sqlx::any::AnyQueryResult;
     use sqlx::FromRow;
     use tempfile::NamedTempFile;
 
@@ -294,7 +301,7 @@ mod tests {
     }
 
     /// HELPERS
-    async fn insert_identity(db: &SqlxDatabase) -> Result<SqliteQueryResult> {
+    async fn insert_identity(db: &SqlxDatabase) -> Result<AnyQueryResult> {
         sqlx::query("INSERT INTO identity VALUES (?1, ?2)")
             .bind("Ifa804b7fca12a19eed206ae180b5b576860ae651")
             .bind("123".to_sql())

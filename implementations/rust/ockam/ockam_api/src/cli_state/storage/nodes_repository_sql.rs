@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use sqlx::sqlite::SqliteRow;
+use sqlx::any::AnyRow;
 use sqlx::*;
 
 use ockam::identity::Identifier;
@@ -81,7 +81,7 @@ impl NodesRepository for NodesSqlxDatabase {
 
     async fn is_default_node(&self, node_name: &str) -> Result<bool> {
         let query = query("SELECT is_default FROM node WHERE name = ?").bind(node_name.to_sql());
-        let row: Option<SqliteRow> = query
+        let row: Option<AnyRow> = query
             .fetch_optional(&*self.database.pool)
             .await
             .into_core()?;
@@ -180,7 +180,7 @@ impl NodesRepository for NodesSqlxDatabase {
     async fn get_node_project_name(&self, node_name: &str) -> Result<Option<String>> {
         let query = query("SELECT project_name FROM node_project WHERE node_name = ?")
             .bind(node_name.to_sql());
-        let row: Option<SqliteRow> = query
+        let row: Option<AnyRow> = query
             .fetch_optional(&*self.database.pool)
             .await
             .into_core()?;
@@ -195,11 +195,11 @@ impl NodesRepository for NodesSqlxDatabase {
 pub(crate) struct NodeRow {
     name: String,
     identifier: String,
-    verbosity: u8,
+    verbosity: i64,
     is_default: bool,
     is_authority: bool,
     tcp_listener_address: Option<String>,
-    pid: Option<u32>,
+    pid: Option<i64>,
 }
 
 impl NodeRow {
@@ -218,11 +218,11 @@ impl NodeRow {
         Ok(NodeInfo::new(
             self.name.clone(),
             Identifier::from_str(&self.identifier.clone())?,
-            self.verbosity,
+            self.verbosity as u8,
             self.is_default,
             self.is_authority,
             tcp_listener_address,
-            self.pid,
+            self.pid.map(|p| p as u32),
         ))
     }
 }

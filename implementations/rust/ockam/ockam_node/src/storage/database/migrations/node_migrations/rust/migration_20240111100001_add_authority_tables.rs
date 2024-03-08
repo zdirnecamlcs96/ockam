@@ -17,7 +17,7 @@ impl RustMigration for AuthorityAttributes {
         Self::version()
     }
 
-    async fn migrate(&self, connection: &mut SqliteConnection) -> Result<bool> {
+    async fn migrate(&self, connection: &mut AnyConnection) -> Result<bool> {
         Self::migrate_authority_attributes_to_members(connection).await
     }
 }
@@ -36,7 +36,7 @@ impl AuthorityAttributes {
 
     /// Duplicate all attributes entry for every known node
     pub(crate) async fn migrate_authority_attributes_to_members(
-        connection: &mut SqliteConnection,
+        connection: &mut AnyConnection,
     ) -> Result<bool> {
         let mut transaction = sqlx::Connection::begin(&mut *connection)
             .await
@@ -99,8 +99,8 @@ struct NodeNameRow {
 mod test {
     use crate::database::migrations::node_migration_set::NodeMigrationSet;
     use crate::database::{MigrationSet, SqlxDatabase};
+    use sqlx::any::AnyArguments;
     use sqlx::query::Query;
-    use sqlx::sqlite::SqliteArguments;
     use std::collections::BTreeMap;
     use tempfile::NamedTempFile;
 
@@ -205,7 +205,7 @@ mod test {
         identifier: &str,
         attributes: Vec<u8>,
         node_name: String,
-    ) -> Query<Sqlite, SqliteArguments> {
+    ) -> Query<Any, AnyArguments> {
         query("INSERT INTO identity_attributes (identifier, attributes, added, expires, attested_by, node_name) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(identifier.to_sql())
             .bind(attributes.to_sql())
@@ -215,10 +215,7 @@ mod test {
             .bind(node_name.to_sql())
     }
 
-    fn insert_node(
-        name: String,
-        is_authority: bool,
-    ) -> Query<'static, Sqlite, SqliteArguments<'static>> {
+    fn insert_node(name: String, is_authority: bool) -> Query<'static, Any, AnyArguments<'static>> {
         query("INSERT INTO node (name, identifier, verbosity, is_default, is_authority) VALUES (?, ?, ?, ?, ?)")
             .bind(name.to_sql())
             .bind("I_TEST".to_string().to_sql())

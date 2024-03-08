@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use sqlx::sqlite::SqliteRow;
+use sqlx::any::AnyRow;
 use sqlx::*;
 
 use ockam::identity::Identifier;
@@ -134,7 +134,7 @@ impl ProjectsRepository for ProjectsSqlxDatabase {
     async fn get_project(&self, project_id: &str) -> Result<Option<ProjectModel>> {
         let query =
             query("SELECT project_name FROM project WHERE project_id=$1").bind(project_id.to_sql());
-        let row: Option<SqliteRow> = query
+        let row: Option<AnyRow> = query
             .fetch_optional(&*self.database.pool)
             .await
             .into_core()?;
@@ -202,7 +202,7 @@ impl ProjectsRepository for ProjectsSqlxDatabase {
 
     async fn get_projects(&self) -> Result<Vec<ProjectModel>> {
         let query = query("SELECT project_name FROM project");
-        let rows: Vec<SqliteRow> = query.fetch_all(&*self.database.pool).await.into_core()?;
+        let rows: Vec<AnyRow> = query.fetch_all(&*self.database.pool).await.into_core()?;
         let project_names: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
         let mut projects = vec![];
         for project_name in project_names {
@@ -217,7 +217,7 @@ impl ProjectsRepository for ProjectsSqlxDatabase {
     async fn get_default_project(&self) -> Result<Option<ProjectModel>> {
         let query =
             query("SELECT project_name FROM project WHERE is_default=$1").bind(true.to_sql());
-        let row: Option<SqliteRow> = query
+        let row: Option<AnyRow> = query
             .fetch_optional(&*self.database.pool)
             .await
             .into_core()?;
