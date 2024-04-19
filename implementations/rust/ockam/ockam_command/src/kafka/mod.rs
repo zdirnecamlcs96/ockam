@@ -39,9 +39,13 @@ fn kafka_default_project_route() -> MultiAddr {
     MultiAddr::from_str(KAFKA_DEFAULT_PROJECT_ROUTE).expect("Failed to parse default project route")
 }
 
-fn kafka_default_outlet_server() -> SocketAddr {
+fn kafka_default_direct_outlet_server() -> SocketAddr {
     SocketAddr::from_str(KAFKA_DEFAULT_BOOTSTRAP_ADDRESS)
-        .expect("Failed to parse default bootstrap address")
+        .expect("Failed to parse default direct outlet server")
+}
+
+fn kafka_default_outlet_server() -> String {
+    KAFKA_DEFAULT_BOOTSTRAP_ADDRESS.to_string()
 }
 
 fn kafka_default_consumer_server() -> SocketAddr {

@@ -64,6 +64,9 @@ pub async fn async_run(
             bootstrap_server.to_owned(),
             brokers_port_range,
             project_route,
+            None,
+            None,
+            None,
         );
         let payload = StartServiceRequest::new(payload, &addr);
         let req = Request::post(endpoint).body(payload);

@@ -10,7 +10,8 @@ use crate::kafka::util::make_brokers_port_range;
 use crate::util::async_cmd;
 use crate::{
     kafka::{
-        kafka_default_consumer_server, kafka_default_outlet_server, kafka_direct_default_addr,
+        kafka_default_consumer_server, kafka_default_direct_outlet_server,
+        kafka_direct_default_addr,
     },
     node::NodeOpts,
     util::parsers::socket_addr_parser,
@@ -30,7 +31,7 @@ pub struct CreateCommand {
     #[arg(long, default_value_t = kafka_default_consumer_server(), value_parser = socket_addr_parser)]
     bind_address: SocketAddr,
     /// The address of the kafka bootstrap broker
-    #[arg(long, default_value_t = kafka_default_outlet_server())]
+    #[arg(long, default_value_t = kafka_default_direct_outlet_server())]
     bootstrap_server: SocketAddr,
     /// Local port range dynamically allocated to kafka brokers, must not overlap with the
     /// bootstrap port

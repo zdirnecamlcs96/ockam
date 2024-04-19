@@ -1,7 +1,9 @@
 use std::net::IpAddr;
+use std::str::FromStr;
 
 use crate::cli_state::random_name;
 use ockam::{Address, Context, Result};
+use ockam_abac::{Action, Expr, Resource, ResourceType};
 use ockam_core::api::{Error, Response};
 use ockam_core::compat::net::SocketAddr;
 use ockam_core::compat::rand::random_string;
@@ -35,12 +37,15 @@ impl NodeManagerWorker {
         context: &Context,
         body: StartServiceRequest<StartKafkaOutletRequest>,
     ) -> Result<Response<()>, Response<Error>> {
+        let request = body.request();
         match self
             .node_manager
             .start_kafka_outlet_service(
                 context,
                 Address::from_string(body.address()),
-                body.request().bootstrap_server_addr,
+                request.bootstrap_server_addr.clone(),
+                request.tls,
+                request.policy_expression.clone(),
             )
             .await
         {
@@ -84,11 +89,13 @@ impl NodeManagerWorker {
             .start_kafka_service(
                 context,
                 Address::from_string(body.address()),
-                request.bootstrap_server_addr().ip(),
-                request.bootstrap_server_addr().port(),
+                request.bootstrap_server_addr(),
                 request.brokers_port_range(),
                 request.project_route(),
                 KafkaServiceKind::Consumer,
+                request.inlet_policy_expression(),
+                request.consumer_policy_expression(),
+                request.producer_policy_expression(),
             )
             .await
         {
@@ -113,11 +120,13 @@ impl NodeManagerWorker {
             .start_kafka_service(
                 context,
                 Address::from_string(body.address()),
-                request.bootstrap_server_addr().ip(),
-                request.bootstrap_server_addr().port(),
+                request.bootstrap_server_addr(),
                 request.brokers_port_range(),
                 outlet_node_multiaddr,
                 KafkaServiceKind::Producer,
+                request.inlet_policy_expression(),
+                request.consumer_policy_expression(),
+                request.producer_policy_expression(),
             )
             .await
         {
@@ -199,6 +208,7 @@ impl InMemoryNode {
             project_authority.clone(),
             default_secure_channel_listener_flow_control_id,
             outlet_policy_expression.clone(),
+            false,
         )
         .await?;
         self.create_outlet(
@@ -217,10 +227,37 @@ impl InMemoryNode {
             None => ConsumerNodeAddr::None,
         };
 
+        let consumer_manual_policy = self
+            .policy_access_control(
+                project_authority.clone(),
+                Resource::new(
+                    format!("kafka-consumer-{}", local_interceptor_address.address()),
+                    ResourceType::KafkaConsumer,
+                ),
+                Action::HandleMessage,
+                None,
+            )
+            .await?
+            .create_manual();
+
+        let producer_manual_policy = self
+            .policy_access_control(
+                project_authority.clone(),
+                Resource::new(
+                    format!("kafka-producer-{}", local_interceptor_address.address()),
+                    ResourceType::KafkaProducer,
+                ),
+                Action::HandleMessage,
+                None,
+            )
+            .await?
+            .create_manual();
+
         let secure_channel_controller = KafkaSecureChannelControllerImpl::new(
             secure_channels,
             consumer_node_addr,
-            project_authority,
+            consumer_manual_policy,
+            producer_manual_policy,
         );
 
         let inlet_controller = KafkaInletController::new(
@@ -278,11 +315,13 @@ impl InMemoryNode {
         &self,
         context: &Context,
         local_interceptor_address: Address,
-        bind_ip: IpAddr,
-        server_bootstrap_port: u16,
+        bind_address: SocketAddr,
         brokers_port_range: (u16, u16),
         outlet_node_multiaddr: MultiAddr,
         kind: KafkaServiceKind,
+        inlet_policy_expression: Option<Expr>,
+        consumer_policy_expression: Option<Expr>,
+        producer_policy_expression: Option<Expr>,
     ) -> Result<()> {
         debug!(
             "outlet_node_multiaddr: {}",
@@ -294,14 +333,43 @@ impl InMemoryNode {
             .clone()
             .ok_or(ApiError::core("NodeManager has no authority"))?;
 
-        let secure_channels = self.secure_channels.clone();
+        let consumer_manual_policy = self
+            .policy_access_control(
+                project_authority.clone(),
+                Resource::new(
+                    format!("kafka-consumer-{}", local_interceptor_address.address()),
+                    ResourceType::KafkaConsumer,
+                ),
+                Action::HandleMessage,
+                consumer_policy_expression,
+            )
+            .await?
+            .create_manual();
+
+        let producer_manual_policy = self
+            .policy_access_control(
+                project_authority.clone(),
+                Resource::new(
+                    format!("kafka-producer-{}", local_interceptor_address.address()),
+                    ResourceType::KafkaProducer,
+                ),
+                Action::HandleMessage,
+                producer_policy_expression,
+            )
+            .await?
+            .create_manual();
+
         let secure_channel_controller = KafkaSecureChannelControllerImpl::new(
-            secure_channels,
+            self.secure_channels.clone(),
             ConsumerNodeAddr::Relay(outlet_node_multiaddr.clone()),
-            project_authority,
+            consumer_manual_policy,
+            producer_manual_policy,
         );
 
-        let inlet_policy_expression = if let Some(project) = outlet_node_multiaddr
+        let inlet_policy_expression = if let Some(inlet_policy_expression) = inlet_policy_expression
+        {
+            Some(inlet_policy_expression)
+        } else if let Some(project) = outlet_node_multiaddr
             .first()
             .and_then(|v| v.cast::<Project>().map(|p| p.to_string()))
         {
@@ -315,7 +383,7 @@ impl InMemoryNode {
             outlet_node_multiaddr.clone(),
             route![local_interceptor_address.clone()],
             route![KAFKA_OUTLET_INTERCEPTOR_ADDRESS],
-            bind_ip,
+            bind_address.ip(),
             PortRange::try_from(brokers_port_range)
                 .map_err(|_| ApiError::core("invalid port range"))?,
             inlet_policy_expression.clone(),
@@ -335,7 +403,7 @@ impl InMemoryNode {
         // we need to call it directly
         self.create_inlet(
             context,
-            SocketAddr::new(bind_ip, server_bootstrap_port).to_string(),
+            bind_address.to_string(),
             route![local_interceptor_address.clone()],
             route![
                 KAFKA_OUTLET_INTERCEPTOR_ADDRESS,
@@ -374,7 +442,9 @@ impl NodeManager {
         &self,
         context: &Context,
         service_address: Address,
-        bootstrap_server_addr: SocketAddr,
+        bootstrap_server_addr: String,
+        tls: bool,
+        outlet_policy_expression: Option<Expr>,
     ) -> Result<()> {
         let default_secure_channel_listener_flow_control_id = context
             .flow_controls()
@@ -393,7 +463,6 @@ impl NodeManager {
             .project_authority
             .clone()
             .ok_or(ApiError::core("NodeManager has no authority"))?;
-        let outlet_policy_expression = None;
 
         OutletManagerService::create(
             context,
@@ -401,14 +470,15 @@ impl NodeManager {
             project_authority,
             default_secure_channel_listener_flow_control_id,
             outlet_policy_expression.clone(),
+            tls,
         )
         .await?;
 
         if let Err(e) = self
             .create_outlet(
                 context,
-                HostnamePort::from_socket_addr(bootstrap_server_addr)?,
-                false,
+                HostnamePort::from_str(&bootstrap_server_addr)?,
+                tls,
                 Some(KAFKA_OUTLET_BOOTSTRAP_ADDRESS.into()),
                 false,
                 OutletAccessControl::PolicyExpression(outlet_policy_expression),

@@ -3,6 +3,7 @@ use crate::output::Output;
 use crate::Result;
 use colorful::Colorful;
 use minicbor::{Decode, Encode};
+use ockam_abac::Expr;
 use ockam_core::compat::net::SocketAddr;
 use ockam_core::Address;
 use ockam_multiaddr::MultiAddr;
@@ -55,18 +56,18 @@ impl DeleteServiceRequest {
 #[rustfmt::skip]
 #[cbor(map)]
 pub struct StartKafkaOutletRequest {
-    #[n(1)] pub bootstrap_server_addr: SocketAddr,
+    #[n(1)] pub bootstrap_server_addr: String,
+    #[n(2)] pub tls: bool,
+    #[n(3)] pub policy_expression: Option<Expr>,
 }
 
 impl StartKafkaOutletRequest {
-    pub fn new(bootstrap_server_addr: SocketAddr) -> Self {
+    pub fn new(bootstrap_server_addr: String, tls: bool, policy_expression: Option<Expr>) -> Self {
         Self {
             bootstrap_server_addr,
+            tls,
+            policy_expression,
         }
-    }
-
-    pub fn bootstrap_server_addr(&self) -> &SocketAddr {
-        &self.bootstrap_server_addr
     }
 }
 
@@ -77,6 +78,9 @@ pub struct StartKafkaRequest {
     #[n(1)] pub bootstrap_server_addr: SocketAddr,
     #[n(2)] brokers_port_range: (u16, u16),
     #[n(3)] project_route: MultiAddr,
+    #[n(4)] pub inlet_policy_expression: Option<Expr>,
+    #[n(5)] pub consumer_policy_expression: Option<Expr>,
+    #[n(6)] pub producer_policy_expression: Option<Expr>,
 }
 
 impl StartKafkaRequest {
@@ -84,11 +88,17 @@ impl StartKafkaRequest {
         bootstrap_server_addr: SocketAddr,
         brokers_port_range: impl Into<(u16, u16)>,
         project_route: MultiAddr,
+        inlet_policy_expression: Option<Expr>,
+        consumer_policy_expression: Option<Expr>,
+        producer_policy_expression: Option<Expr>,
     ) -> Self {
         Self {
             bootstrap_server_addr,
             brokers_port_range: brokers_port_range.into(),
             project_route,
+            inlet_policy_expression,
+            consumer_policy_expression,
+            producer_policy_expression,
         }
     }
 
@@ -100,6 +110,18 @@ impl StartKafkaRequest {
     }
     pub fn project_route(&self) -> MultiAddr {
         self.project_route.clone()
+    }
+
+    pub fn inlet_policy_expression(&self) -> Option<Expr> {
+        self.inlet_policy_expression.clone()
+    }
+
+    pub fn consumer_policy_expression(&self) -> Option<Expr> {
+        self.consumer_policy_expression.clone()
+    }
+
+    pub fn producer_policy_expression(&self) -> Option<Expr> {
+        self.producer_policy_expression.clone()
     }
 }
 

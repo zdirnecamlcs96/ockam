@@ -5,6 +5,7 @@ use std::sync::Arc;
 use clap::{command, Args};
 use colorful::Colorful;
 use miette::miette;
+use ockam_abac::Expr;
 use ockam_api::colors::OckamColor;
 use ockam_api::nodes::models::services::{
     StartKafkaDirectRequest, StartKafkaRequest, StartServiceRequest,
@@ -56,6 +57,24 @@ pub struct CreateCommand {
     /// The route to the Kafka consumer node, valid only when --bootstrap-server is specified
     #[arg(long, requires = "bootstrap_server")]
     pub consumer: Option<MultiAddr>,
+    /// Policy expression that will be used for access control to the Kafka Inlet.
+    /// If you don't provide it, the policy set for the "tcp-inlet" resource type will be used.
+    ///
+    /// You can check the fallback policy with `ockam policy show --resource-type tcp-inlet`.
+    #[arg(hide = true, long = "allow", id = "INLET-EXPRESSION")]
+    pub inlet_policy_expression: Option<Expr>,
+    /// Policy expression that will be used for access control to the Kafka Consumer.
+    /// If you don't provide it, the policy set for the "kafka-consumer" resource type will be used.
+    ///
+    /// You can check the fallback policy with `ockam policy show --resource-type kafka-consumer`.
+    #[arg(hide = true, long = "allow-consumer", id = "CONSUMER-EXPRESSION")]
+    pub consumer_policy_expression: Option<Expr>,
+    /// Policy expression that will be used for access control to the Kafka Producer.
+    /// If you don't provide it, the policy set for the "kafka-producer" resource type will be used.
+    ///
+    /// You can check the fallback policy with `ockam policy show --resource-type kafka-producer`.
+    #[arg(hide = true, long = "allow-producer", id = "PRODUCER-EXPRESSION")]
+    pub producer_policy_expression: Option<Expr>,
 }
 
 #[async_trait]
@@ -112,7 +131,14 @@ impl Command for CreateCommand {
             consumer_future = Some(async move {
                 let node = BackgroundNodeClient::create(ctx, &opts.state, &at_node).await?;
 
-                let payload = StartKafkaRequest::new(self.from, brokers_port_range, to);
+                let payload = StartKafkaRequest::new(
+                    self.from,
+                    brokers_port_range,
+                    to,
+                    self.inlet_policy_expression,
+                    self.consumer_policy_expression,
+                    self.producer_policy_expression,
+                );
                 let payload = StartServiceRequest::new(payload, &addr);
                 let req = Request::post("/node/services/kafka_consumer").body(payload);
                 start_service_impl(ctx, &node, "KafkaConsumer", req).await?;

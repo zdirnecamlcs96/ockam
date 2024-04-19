@@ -20,7 +20,7 @@ use ockam::identity::{
 };
 use ockam::{RelayService, RelayServiceOptions};
 use ockam_abac::expr::str;
-use ockam_abac::{Action, Env, Expr, Policies, Resource, Resources};
+use ockam_abac::{Action, Env, Expr, Policies, PolicyAccessControl, Resource, Resources};
 use ockam_core::flow_control::FlowControlId;
 use ockam_core::{
     AllowAll, AsyncTryClone, CachedIncomingAccessControl, CachedOutgoingAccessControl,
@@ -175,28 +175,9 @@ impl NodeManager {
         let resource_type_str = resource.resource_type.to_string();
         let action_str = action.as_ref();
         if let Some(authority) = authority {
-            // Populate environment with known attributes:
-            let mut env = Env::new();
-            env.put("resource.id", str(resource_name_str));
-            env.put("action.id", str(action_str));
-
-            // Store policy for the given resource and action
-            let policies = self.policies();
-            if let Some(expression) = expression {
-                policies
-                    .store_policy_for_resource_name(&resource.resource_name, &action, &expression)
-                    .await?;
-            }
-            self.resources().store_resource(&resource).await?;
-
-            // Create the policy access control
-            let policy_access_control = policies.make_policy_access_control(
-                self.cli_state.identities_attributes(&self.node_name),
-                resource,
-                action,
-                env,
-                authority,
-            );
+            let policy_access_control = self
+                .policy_access_control(authority, resource, action, expression)
+                .await?;
 
             let incoming_ac = policy_access_control.create_incoming();
             let outgoing_ac = policy_access_control.create_outgoing(ctx).await?;
@@ -220,6 +201,40 @@ impl NodeManager {
             }
             Ok((Arc::new(AllowAll), Arc::new(AllowAll)))
         }
+    }
+
+    pub async fn policy_access_control(
+        &self,
+        authority: Identifier,
+        resource: Resource,
+        action: Action,
+        expression: Option<Expr>,
+    ) -> ockam_core::Result<PolicyAccessControl> {
+        let resource_name_str = resource.resource_name.as_str();
+        let action_str = action.as_ref();
+
+        // Populate environment with known attributes:
+        let mut env = Env::new();
+        env.put("resource.id", str(resource_name_str));
+        env.put("action.id", str(action_str));
+
+        // Store policy for the given resource and action
+        let policies = self.policies();
+        if let Some(expression) = expression {
+            policies
+                .store_policy_for_resource_name(&resource.resource_name, &action, &expression)
+                .await?;
+        }
+        self.resources().store_resource(&resource).await?;
+
+        // Create the policy access control
+        Ok(policies.make_policy_access_control(
+            self.cli_state.identities_attributes(&self.node_name),
+            resource,
+            action,
+            env,
+            authority,
+        ))
     }
 
     pub fn policies(&self) -> Policies {

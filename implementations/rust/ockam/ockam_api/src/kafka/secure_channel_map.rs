@@ -1,10 +1,10 @@
 use minicbor::Decoder;
 
 use ockam::identity::{
-    DecryptionRequest, DecryptionResponse, EncryptionRequest, EncryptionResponse, Identifier,
+    DecryptionRequest, DecryptionResponse, EncryptionRequest, EncryptionResponse,
     SecureChannelRegistryEntry, SecureChannels,
 };
-use ockam_abac::IncomingAbac;
+use ockam_abac::ManualPolicyAccessControl;
 use ockam_core::api::{Request, ResponseHeader, Status};
 use ockam_core::compat::collections::{HashMap, HashSet};
 use ockam_core::compat::sync::Arc;
@@ -176,14 +176,16 @@ struct InnerSecureChannelControllerImpl<F: RelayCreator> {
     topic_relay_set: HashSet<TopicPartition>,
     relay_creator: Option<F>,
     secure_channels: Arc<SecureChannels>,
-    access_control: IncomingAbac, // FIXME
+    consumer_manual_policy: ManualPolicyAccessControl,
+    producer_manual_policy: ManualPolicyAccessControl,
 }
 
 impl KafkaSecureChannelControllerImpl<NodeManagerRelayCreator> {
     pub(crate) fn new(
         secure_channels: Arc<SecureChannels>,
         consumer_node_multiaddr: ConsumerNodeAddr,
-        authority_identifier: Identifier,
+        consumer_manual_policy: ManualPolicyAccessControl,
+        producer_manual_policy: ManualPolicyAccessControl,
     ) -> KafkaSecureChannelControllerImpl<NodeManagerRelayCreator> {
         let relay_creator = match consumer_node_multiaddr.clone() {
             ConsumerNodeAddr::Direct(_) | ConsumerNodeAddr::None => None,
@@ -200,7 +202,8 @@ impl KafkaSecureChannelControllerImpl<NodeManagerRelayCreator> {
             secure_channels,
             consumer_node_multiaddr,
             relay_creator,
-            authority_identifier,
+            consumer_manual_policy,
+            producer_manual_policy,
         )
     }
 }
@@ -211,14 +214,9 @@ impl<F: RelayCreator> KafkaSecureChannelControllerImpl<F> {
         secure_channels: Arc<SecureChannels>,
         consumer_node_multiaddr: ConsumerNodeAddr,
         relay_creator: Option<F>,
-        authority_identifier: Identifier,
+        consumer_manual_policy: ManualPolicyAccessControl,
+        producer_manual_policy: ManualPolicyAccessControl,
     ) -> KafkaSecureChannelControllerImpl<F> {
-        // FIXME
-        let access_control = IncomingAbac::check_credential_only(
-            secure_channels.identities().identities_attributes(),
-            authority_identifier,
-        );
-
         Self {
             inner: Arc::new(Mutex::new(InnerSecureChannelControllerImpl {
                 topic_encryptor_map: Default::default(),
@@ -226,7 +224,8 @@ impl<F: RelayCreator> KafkaSecureChannelControllerImpl<F> {
                 secure_channels,
                 relay_creator,
                 consumer_node_multiaddr,
-                access_control,
+                consumer_manual_policy,
+                producer_manual_policy,
             })),
         }
     }
@@ -314,7 +313,8 @@ impl<F: RelayCreator> KafkaSecureChannelControllerImpl<F> {
         }
     }
 
-    /// returns encryptor api address
+    /// Creates a secure channel from the producer to the consumer needed to encrypt messages.
+    /// Returns the relative secure channel entry.
     async fn get_or_create_secure_channel_for(
         &self,
         context: &mut Context,
@@ -412,9 +412,8 @@ impl<F: RelayCreator> KafkaSecureChannelControllerImpl<F> {
 
         if let Some(entry) = record {
             let authorized = inner
-                .access_control
-                .abac()
-                .is_identity_authorized(entry.their_id(), inner.access_control.expression())
+                .consumer_manual_policy
+                .is_identity_authorized(entry.their_id())
                 .await?;
 
             if authorized {
@@ -438,7 +437,8 @@ impl<F: RelayCreator> KafkaSecureChannelControllerImpl<F> {
         }
     }
 
-    /// return decryptor api address
+    /// Returns the secure channel entry for the consumer decryptor address and validate it
+    /// against the producer manual policy.
     async fn get_secure_channel_for(
         &self,
         consumer_decryptor_address: &Address,
@@ -460,9 +460,8 @@ impl<F: RelayCreator> KafkaSecureChannelControllerImpl<F> {
             })?;
 
         let authorized = inner
-            .access_control
-            .abac()
-            .is_identity_authorized(entry.their_id(), inner.access_control.expression())
+            .producer_manual_policy
+            .is_identity_authorized(entry.their_id())
             .await?;
 
         if authorized {
@@ -471,7 +470,7 @@ impl<F: RelayCreator> KafkaSecureChannelControllerImpl<F> {
             Err(Error::new(
                 Origin::Transport,
                 Kind::Invalid,
-                "unauthorized secure channel",
+                "unauthorized secure channel for producer with identifier {}",
             ))
         }
     }
