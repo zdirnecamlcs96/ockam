@@ -59,7 +59,9 @@ use ockam::{
 };
 use ockam_core::{route, Error, Result};
 use ockam_node::Context;
-use ockam_transport_udp::{UdpBindArguments, UdpBindOptions, UdpHolePuncher, UdpTransport, UDP};
+use ockam_transport_udp::{
+    UdpBindArguments, UdpBindOptions, UdpHolePuncher, UdpHolePuncherOptions, UdpTransport, UDP,
+};
 use rand::Rng;
 use std::ops::Range;
 use tracing::{error, info};
@@ -109,13 +111,20 @@ async fn do_main(ctx: &mut Context) -> Result<()> {
         .await?;
 
     ctx.start_worker(ECHOER, Echoer).await?;
-    ctx.flow_controls()
-        .add_consumer(ECHOER, bind.flow_control_id());
 
     let rendezvous_route = route![(UDP, rendezvous_addr), RENDEZVOUS];
-    let mut puncher =
-        UdpHolePuncher::create(ctx, &bind, &this_name, &that_name, rendezvous_route).await?;
-    info!("Puncher address = {:?}", puncher.local_address());
+    let mut puncher = UdpHolePuncher::create(
+        ctx,
+        &bind,
+        &this_name,
+        &that_name,
+        rendezvous_route,
+        UdpHolePuncherOptions::new(),
+    )
+    .await?;
+    ctx.flow_controls()
+        .add_consumer(ECHOER, puncher.flow_control_id());
+    info!("Puncher address = {:?}", puncher.sender_address());
 
     // Wait for hole to open
     info!("Waiting for hole to open");
@@ -123,7 +132,7 @@ async fn do_main(ctx: &mut Context) -> Result<()> {
     info!("Hole open!");
 
     // Exchange messages with peer
-    let r = route![puncher.local_address(), ECHOER];
+    let r = route![puncher.sender_address(), ECHOER];
     for i in 1..=MESSAGE_COUNT {
         // Try to send messages to remote echoer
         let msg = format!(

@@ -55,3 +55,12 @@ name = "rendezvous_server"
 
 [[example]]
 name = "puncher"
+
+[[example]]
+name = "puncher_inlet"
+
+[[example]]
+name = "puncher_outlet"
+
+[[example]]
+name = "example"
