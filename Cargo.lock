@@ -3120,6 +3120,7 @@ dependencies = [
  "anyhow",
  "example_test_helper",
  "hex",
+ "log",
  "ockam",
  "ockam_api",
  "ockam_core",
@@ -3130,6 +3131,7 @@ dependencies = [
  "rand",
  "serde_json",
  "serial_test",
+ "tracing",
 ]
 
 [[package]]

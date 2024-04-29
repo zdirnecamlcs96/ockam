@@ -32,6 +32,7 @@ storage = ["ockam_api/storage"]
 [dependencies]
 anyhow = "1"
 hex = "0.4"
+log = { version = "0.4.21", features = [] }
 ockam = { path = "../../../implementations/rust/ockam/ockam", default_features = false, features = ["software_vault"] }
 ockam_api = { path = "../../../implementations/rust/ockam/ockam_api" }
 ockam_core = { path = "../../../implementations/rust/ockam/ockam_core" }
@@ -40,6 +41,7 @@ ockam_transport_tcp = { path = "../../../implementations/rust/ockam/ockam_transp
 ockam_transport_udp = { path = "../../../implementations/rust/ockam/ockam_transport_udp" }
 ockam_transport_uds = { path = "../../../implementations/rust/ockam/ockam_transport_uds" }
 serde_json = { version = "1.0", default_features = false }
+tracing = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 example_test_helper = { path = "../../../tools/docs/example_test_helper" }
