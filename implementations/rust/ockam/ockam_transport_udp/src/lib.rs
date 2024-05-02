@@ -1,25 +1,36 @@
 //! This crate provides a UDP Transport for Ockam's Routing Protocol.
 //!
-//! ## Examples
-//
-// In `ockam_transport_udp` directory, run an echo server
-// with command `cargo run --example echo_server`
-//
-// Then, run a client that sends a hello message to the server
-// with command `cargo run --example client`
-use ockam_core::TransportType;
+#![deny(unsafe_code)]
+#![warn(
+    missing_docs,
+    dead_code,
+    trivial_casts,
+    trivial_numeric_casts,
+    unused_import_braces,
+    unused_qualifications
+)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
-pub use hole_puncher::{PunchError, UdpHolePuncher};
-pub use rendezvous_service::UdpRendezvousService;
-pub use transport::UdpTransport;
-pub use transport::UdpTransportExtension;
+#[cfg(feature = "std")]
+extern crate core;
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 mod hole_puncher;
+mod options;
 mod rendezvous_service;
-mod router;
 mod transport;
+
 mod workers;
 
-pub const UDP: TransportType = TransportType::new(2);
+pub use hole_puncher::*;
+pub use options::UdpBindOptions;
+pub use rendezvous_service::UdpRendezvousService;
+pub use transport::UdpTransportExtension;
+pub use transport::{UdpBindArguments, UdpTransport};
 
-pub const CLUSTER_NAME: &str = "_internals.transport.udp";
+pub(crate) const CLUSTER_NAME: &str = "_internals.transport.udp";
+
+/// Transport type for UDP addresses
+pub const UDP: ockam_core::TransportType = ockam_core::TransportType::new(2);

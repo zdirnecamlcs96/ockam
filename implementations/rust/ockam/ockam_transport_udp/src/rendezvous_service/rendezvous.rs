@@ -2,8 +2,7 @@ use crate::{
     rendezvous_service::{RendezvousRequest, RendezvousResponse},
     UDP,
 };
-use ockam_core::errcode::{Kind, Origin};
-use ockam_core::{async_trait, Address, Error, Result, Route, Routed, Worker};
+use ockam_core::{async_trait, Address, Result, Route, Routed, Worker};
 use ockam_node::Context;
 use std::collections::BTreeMap;
 use tracing::{debug, trace, warn};
@@ -19,7 +18,7 @@ use tracing::{debug, trace, warn};
 /// # Example
 ///
 /// ```rust
-/// use ockam_transport_udp::{UdpTransport, UdpRendezvousService};
+/// use ockam_transport_udp::{UdpTransport, UdpBindOptions, UdpRendezvousService, UdpBindArguments};
 /// # use ockam_node::Context;
 /// # use ockam_core::Result;
 /// # async fn test(ctx: Context) -> Result<()> {
@@ -27,7 +26,7 @@ use tracing::{debug, trace, warn};
 /// // Start a Rendezvous service with address 'my_rendezvous' and listen on UDP port 4000
 /// UdpRendezvousService::start(&ctx, "my_rendezvous").await?;
 /// let udp = UdpTransport::create(&ctx).await?;
-/// udp.listen("0.0.0.0:4000").await?;
+/// udp.bind(UdpBindArguments::new().with_bind_address("0.0.0.0:4000")?, UdpBindOptions::new()).await?;
 /// # Ok(()) }
 /// ```
 pub struct UdpRendezvousService;
@@ -81,10 +80,19 @@ impl RendezvousWorker {
         res.into()
     }
 
+    /// Extract first UDP Address from `return route`
+    fn get_udp_address(return_route: &Route) -> Option<Address> {
+        return_route
+            .iter()
+            .find(|&x| x.transport_type() == UDP)
+            .cloned()
+    }
+
     // Handle Update request
     fn handle_update(&mut self, puncher_name: &str, return_route: &Route) {
         let r = Self::parse_route(return_route);
         if !r.is_empty() {
+            debug!("Update {} route to {}", puncher_name, r);
             self.map.insert(puncher_name.to_owned(), r);
         } else {
             // This could happen if a client erroneously contacts this service over TCP not UDP, for example
@@ -97,11 +105,19 @@ impl RendezvousWorker {
     }
 
     // Handle Query request
-    fn handle_query(&self, puncher_name: &String) -> Result<Route> {
+    fn handle_query(&self, puncher_name: &String) -> Option<Route> {
         match self.map.get(puncher_name) {
-            Some(route) => Ok(route.clone()),
-            None => Err(Error::new_without_cause(Origin::Other, Kind::NotFound)),
+            Some(route) => {
+                debug!("Return route for {}. Which is {}", puncher_name, route);
+                Some(route.clone())
+            }
+            None => None,
         }
+    }
+
+    // Handle Update request
+    fn handle_get_my_address(&mut self, return_route: &Route) -> Option<String> {
+        Self::get_udp_address(return_route).map(|a| a.address().to_string())
     }
 }
 
@@ -133,6 +149,23 @@ impl Worker for RendezvousWorker {
             RendezvousRequest::Ping => {
                 ctx.send(return_route, RendezvousResponse::Pong).await?;
             }
+            RendezvousRequest::GetMyAddress => {
+                let res = self.handle_get_my_address(&return_route);
+                match res {
+                    Some(udp_address) => {
+                        ctx.send(return_route, RendezvousResponse::GetMyAddress(udp_address))
+                            .await?;
+                    }
+                    None => {
+                        // This could happen if a client erroneously contacts this service over TCP not UDP, for example
+                        warn!(
+                            "Return route has no UDP part, will not return address map: {:?}",
+                            return_route
+                        );
+                        // Ignore issue. There's no (current) way to inform sender.
+                    }
+                }
+            }
         }
         trace!("Map: {:?}", self.map);
         Ok(())
@@ -143,13 +176,11 @@ impl Worker for RendezvousWorker {
 mod tests {
     use super::RendezvousWorker;
     use crate::rendezvous_service::{RendezvousRequest, RendezvousResponse};
-    use crate::{UdpRendezvousService, UdpTransport, UDP};
-    use ockam_core::errcode::Origin;
-    use ockam_core::{route, Error, Result, Route, Routed, TransportType, Worker};
+    use crate::transport::common::UdpBind;
+    use crate::transport::UdpBindArguments;
+    use crate::{UdpBindOptions, UdpRendezvousService, UdpTransport, UDP};
+    use ockam_core::{route, Result, Route, TransportType};
     use ockam_node::Context;
-    use std::net::SocketAddr;
-    use tokio::net::UdpSocket;
-    use tracing::debug;
 
     #[test]
     fn parse_route() {
@@ -207,7 +238,7 @@ mod tests {
 
         // Query service for non-existent node, should error
         let res = query_operation("DoesNotExist", ctx, &rendezvous_route).await;
-        assert!(res.is_err(), "Query operation should have failed");
+        assert!(res.is_none(), "Query operation should have failed");
         Ok(())
     }
 
@@ -222,25 +253,49 @@ mod tests {
         Ok(())
     }
 
-    /// Helper
-    async fn test_setup(ctx: &mut Context) -> Result<(Route, SocketAddr)> {
-        // Find an available port
-        let bind_addr = *available_local_ports(1).await?.first().unwrap();
-        debug!("bind_addr = {:?}", bind_addr);
+    #[ockam_macros::test]
+    async fn get_my_address(ctx: &mut Context) -> Result<()> {
+        let (rendezvous_route, udp_bind) = test_setup(ctx).await?;
 
+        let res: RendezvousResponse = ctx
+            .send_and_receive(rendezvous_route, RendezvousRequest::GetMyAddress)
+            .await?;
+
+        match res {
+            RendezvousResponse::GetMyAddress(address) => {
+                assert_eq!(address, udp_bind.bind_address().to_string());
+            }
+            _ => panic!(),
+        }
+
+        Ok(())
+    }
+
+    /// Helper
+    async fn test_setup(ctx: &mut Context) -> Result<(Route, UdpBind)> {
         // Create transport, start rendezvous service, start echo service and listen
         let transport = UdpTransport::create(ctx).await?;
         UdpRendezvousService::start(ctx, "rendezvous").await?;
-        let rendezvous_route = route![(UDP, bind_addr.to_string()), "rendezvous"];
-        ctx.start_worker("echo", EchoUDPAddress).await?;
-        let route_echo = route![(UDP, bind_addr.to_string()), "echo"];
-        transport.listen(bind_addr.to_string()).await?;
 
-        // Use echo service to find out our UDP sending address
-        let send_addr: String = ctx.send_and_receive(route_echo, String::new()).await?;
-        let send_addr = send_addr.parse::<SocketAddr>().unwrap();
+        let udp_bind = transport
+            .bind(UdpBindArguments::new(), UdpBindOptions::new())
+            .await?;
 
-        Ok((rendezvous_route, send_addr))
+        ctx.flow_controls()
+            .add_consumer("rendezvous", udp_bind.flow_control_id());
+
+        let bind_addr = udp_bind.bind_address().to_string();
+
+        let rendezvous_route = route![
+            udp_bind.sender_address().clone(),
+            (UDP, bind_addr.to_string()),
+            "rendezvous"
+        ];
+
+        ctx.flow_controls()
+            .add_consumer("echo", udp_bind.flow_control_id());
+
+        Ok((rendezvous_route, udp_bind))
     }
 
     /// Helper
@@ -254,63 +309,14 @@ mod tests {
     }
 
     /// Helper
-    async fn query_operation(puncher_name: &str, ctx: &Context, route: &Route) -> Result<Route> {
+    async fn query_operation(puncher_name: &str, ctx: &Context, route: &Route) -> Option<Route> {
         let msg = RendezvousRequest::Query {
             puncher_name: String::from(puncher_name),
         };
-        let res: RendezvousResponse = ctx.send_and_receive(route.clone(), msg).await?;
+        let res: RendezvousResponse = ctx.send_and_receive(route.clone(), msg).await.unwrap();
         match res {
             RendezvousResponse::Query(r) => r,
             r => panic!("Unexpected response: {:?}", r),
         }
-    }
-
-    /// Echo service that allows us to find out the UDP address the tests are sending from
-    struct EchoUDPAddress;
-
-    #[ockam_core::worker]
-    impl Worker for EchoUDPAddress {
-        type Message = String;
-        type Context = Context;
-
-        async fn handle_message(&mut self, ctx: &mut Context, msg: Routed<String>) -> Result<()> {
-            // Get source UDP address
-            let src_addr = match msg
-                .return_route()
-                .iter()
-                .find(|x| x.transport_type() == UDP)
-            {
-                Some(addr) => String::from(addr.address()),
-                None => panic!("Return route has no UDP hop"),
-            };
-
-            // Reply
-            debug!("Replying '{}' to {}", src_addr, &msg.return_route());
-            ctx.send(msg.return_route(), src_addr).await
-        }
-    }
-
-    const AVAILABLE_LOCAL_PORTS_ADDR: &str = "127.0.0.1:0";
-
-    /// Helper function. Try to find numbers of available local UDP ports.
-    async fn available_local_ports(count: usize) -> Result<Vec<SocketAddr>> {
-        let mut sockets = Vec::new();
-        let mut addrs = Vec::new();
-
-        for _ in 0..count {
-            let s = UdpSocket::bind(AVAILABLE_LOCAL_PORTS_ADDR)
-                .await
-                .map_err(|e| Error::new_unknown(Origin::Unknown, e))?;
-            let a = s
-                .local_addr()
-                .map_err(|e| Error::new_unknown(Origin::Unknown, e))?;
-
-            addrs.push(a);
-
-            // Keep sockets open until we are done asking for available ports
-            sockets.push(s);
-        }
-
-        Ok(addrs)
     }
 }

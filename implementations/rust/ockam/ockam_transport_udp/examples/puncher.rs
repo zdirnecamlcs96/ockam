@@ -59,7 +59,7 @@ use ockam::{
 };
 use ockam_core::{route, Error, Result};
 use ockam_node::Context;
-use ockam_transport_udp::{UdpHolePuncher, UdpTransport, UDP};
+use ockam_transport_udp::{UdpBindArguments, UdpBindOptions, UdpHolePuncher, UdpTransport, UDP};
 use rand::Rng;
 use std::ops::Range;
 use tracing::{error, info};
@@ -93,18 +93,29 @@ async fn do_main(ctx: &mut Context) -> Result<()> {
     // Handle command line arguments
     let this_name = std::env::args().nth(1).unwrap();
     let that_name = std::env::args().nth(2).unwrap();
-    let rendezvous_addr = std::env::args().nth(3).unwrap();
+    let rendezvous_addr = std::env::args()
+        .nth(3)
+        .unwrap_or("127.0.0.1:4000".to_string());
     info!(
         "this_name = {}, that_name = {}, rendezvous = {}",
         this_name, that_name, rendezvous_addr
     );
 
     // Create transport, echoer service and puncher
-    UdpTransport::create(ctx).await?;
+    let udp = UdpTransport::create(ctx).await?;
+
+    let bind = udp
+        .bind(UdpBindArguments::new(), UdpBindOptions::new())
+        .await?;
+
     ctx.start_worker(ECHOER, Echoer).await?;
+    ctx.flow_controls()
+        .add_consumer(ECHOER, bind.flow_control_id());
+
     let rendezvous_route = route![(UDP, rendezvous_addr), RENDEZVOUS];
-    let mut puncher = UdpHolePuncher::create(ctx, &this_name, &that_name, rendezvous_route).await?;
-    info!("Puncher address = {:?}", puncher.address());
+    let mut puncher =
+        UdpHolePuncher::create(ctx, &bind, &this_name, &that_name, rendezvous_route).await?;
+    info!("Puncher address = {:?}", puncher.local_address());
 
     // Wait for hole to open
     info!("Waiting for hole to open");
@@ -112,7 +123,7 @@ async fn do_main(ctx: &mut Context) -> Result<()> {
     info!("Hole open!");
 
     // Exchange messages with peer
-    let r = route![puncher.address(), ECHOER];
+    let r = route![puncher.local_address(), ECHOER];
     for i in 1..=MESSAGE_COUNT {
         // Try to send messages to remote echoer
         let msg = format!(

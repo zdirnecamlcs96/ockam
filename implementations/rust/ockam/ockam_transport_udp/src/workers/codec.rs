@@ -4,6 +4,7 @@ use ockam_core::{Decodable, Encodable};
 use ockam_transport_core::TransportError;
 use tokio_util::codec::{Decoder, Encoder};
 
+// TODO: Review
 pub(crate) struct TransportMessageCodec;
 
 impl Encoder<TransportMessage> for TransportMessageCodec {

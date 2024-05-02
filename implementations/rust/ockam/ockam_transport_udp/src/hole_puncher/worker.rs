@@ -1,13 +1,21 @@
 use crate::hole_puncher::message::PunchMessage;
+use crate::hole_puncher::sender::UdpHolePunchSenderWorker;
+use crate::hole_puncher::{Addresses, UdpHolePuncherOptions};
 use crate::rendezvous_service::{RendezvousRequest, RendezvousResponse};
+use crate::transport::common::UdpBind;
 use crate::PunchError;
+use ockam_core::compat::sync::Arc;
+use ockam_core::compat::sync::RwLock;
+use ockam_core::errcode::{Kind, Origin};
 use ockam_core::{
-    Address, AllowAll, Any, Decodable, Encodable, Mailbox, Mailboxes, Result, Route, Routed, Worker,
+    route, Address, AllowAll, Any, Decodable, DenyAll, Error, LocalMessage, Mailbox, Mailboxes,
+    Result, Route, Routed, Worker,
 };
 use ockam_node::{Context, DelayedEvent, MessageSendReceiveOptions, WorkerBuilder};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, trace};
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::Sender;
+use tracing::{debug, error, trace};
 
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(1);
 const HOLE_OPEN_TIMEOUT: Duration = Duration::from_secs(20);
@@ -55,14 +63,11 @@ const QUICK_TIMEOUT: Duration = Duration::from_secs(3);
 /// by the 'main' mailbox are forwarded to local entities from
 /// the 'local' mailbox.
 pub(crate) struct UdpHolePunchWorker {
-    /// Address of main mailbox
-    main_addr: Address,
-    /// Address of local mailbox
-    local_addr: Address,
-    /// Address of our handle's mailbox
-    handle_addr: Address,
+    addresses: Addresses,
     /// For generating internal heartbeat messages
-    heartbeat: DelayedEvent<PunchMessage>,
+    heartbeat: DelayedEvent<()>,
+    /// Address of the corresponding sender
+    udp_sender_address: Address,
     /// Route to Rendezvous service
     rendezvous_route: Route,
     /// Name of this puncher
@@ -70,14 +75,13 @@ pub(crate) struct UdpHolePunchWorker {
     /// Name of peer node's puncher
     peer_puncher_name: String,
     /// Is hole open to peer?
-    hole_open: bool,
+    hole_open: Arc<RwLock<bool>>,
+    /// Notify if someone is waiting for the hole
+    notify_hole_open_sender: Sender<Route>,
     /// Route to peer node's puncher
     peer_route: Option<Route>,
     /// Timestamp of most recent message received from peer
     peer_received_at: Instant,
-    /// Option for our handle [`UdpHolePuncher`](crate::hole_puncher::UdpHolePuncher)
-    /// to receive a callback when we next open a hole to peer
-    wait_for_hole_open_addr: Option<Address>,
 }
 
 impl UdpHolePunchWorker {
@@ -86,7 +90,13 @@ impl UdpHolePunchWorker {
         let msg = RendezvousRequest::Update {
             puncher_name: self.this_puncher_name.clone(),
         };
-        ctx.send(self.rendezvous_route.clone(), msg).await
+        // TODO: Add confirmation
+        ctx.send_from_address(
+            self.rendezvous_route.clone(),
+            msg,
+            self.addresses.remote_address().clone(),
+        )
+        .await
     }
 
     /// Query the Rendezvous service
@@ -105,15 +115,46 @@ impl UdpHolePunchWorker {
             .await?
             .into_body()?;
 
-        match res {
+        let r = match res {
             RendezvousResponse::Query(r) => r,
-            _ => Err(PunchError::Internal)?,
-        }
+            _ => return Err(PunchError::Internal)?,
+        };
+
+        let r = match r {
+            None => return Err(PunchError::Internal)?,
+            Some(r) => r,
+        };
+
+        Ok(route![self.udp_sender_address.clone(), r])
+    }
+
+    /// Query the Rendezvous service
+    async fn rendezvous_get_my_address(&self, ctx: &mut Context) -> Result<Route> {
+        let res = ctx
+            .send_and_receive_extended::<RendezvousResponse>(
+                self.rendezvous_route.clone(),
+                RendezvousRequest::GetMyAddress,
+                MessageSendReceiveOptions::new().with_timeout(QUICK_TIMEOUT),
+            )
+            .await?
+            .into_body()?;
+
+        let r = match res {
+            RendezvousResponse::Query(r) => r,
+            _ => return Err(PunchError::Internal)?,
+        };
+
+        let r = match r {
+            None => return Err(PunchError::Internal)?,
+            Some(r) => r,
+        };
+
+        Ok(route![self.udp_sender_address.clone(), r])
     }
 
     /// Test to see if we can reach the Rendezvous service
     pub(crate) async fn rendezvous_reachable(
-        ctx: &mut Context,
+        ctx: &Context,
         rendezvous_route: &Route,
     ) -> Result<bool> {
         for _ in 0..PING_TRIES {
@@ -140,70 +181,93 @@ impl UdpHolePunchWorker {
 
     pub(crate) async fn create(
         ctx: &Context,
-        handle_addr: &Address,
+        bind: &UdpBind,
         rendezvous_route: Route,
         this_puncher_name: &str,
         peer_puncher_name: &str,
-    ) -> Result<(Address, Address)> {
-        // Create worker' addresses, heartbeat & mailboxes
-        let main_addr =
-            Address::random_tagged(format!("UdpHolePuncher.main.{}", this_puncher_name).as_str());
-        let local_addr =
-            Address::random_tagged(format!("UdpHolePuncher.local.{}", this_puncher_name).as_str());
+        options: UdpHolePuncherOptions,
+    ) -> Result<(Addresses, broadcast::Receiver<Route>)> {
+        // Create worker's addresses, heartbeat & mailboxes
+        let addresses = Addresses::generate(this_puncher_name);
 
         let heartbeat =
-            DelayedEvent::create(ctx, main_addr.clone(), PunchMessage::Heartbeat).await?;
+            DelayedEvent::create(ctx, addresses.heartbeat_address().clone(), ()).await?;
 
-        // TODO: Roll implementations of IncomingAccessControl and OutgoingAccessControl
-        // to allow messaging the heartbeat, Rendezvous service and the peer (whose address
-        // may be unknown and change).
-
-        let main_mailbox = Mailbox::new(
-            main_addr.clone(),
-            Arc::new(AllowAll), // FIXME: @ac
-            Arc::new(AllowAll), // FIXME: @ac
+        let remote_mailbox = Mailbox::new(
+            addresses.remote_address().clone(),
+            Arc::new(AllowAll),
+            Arc::new(AllowAll),
         );
 
-        // TODO: Allow app to specify the access control for the local mailbox
+        options.setup_flow_control(ctx.flow_controls(), &addresses, bind.sender_address())?;
 
-        let local_mailbox = Mailbox::new(
-            local_addr.clone(),
-            Arc::new(AllowAll), // FIXME: @ac
-            Arc::new(AllowAll), // FIXME: @ac
+        let receiver_mailbox = Mailbox::new(
+            addresses.receiver_address().clone(),
+            Arc::new(DenyAll),
+            options.create_receiver_outgoing_access_control(ctx.flow_controls()),
         );
 
-        // Create and start worker
-        let worker = Self {
-            main_addr: main_addr.clone(),
-            local_addr: local_addr.clone(),
-            handle_addr: handle_addr.clone(),
-            heartbeat,
-            rendezvous_route,
-            this_puncher_name: String::from(this_puncher_name),
-            peer_puncher_name: String::from(peer_puncher_name),
-            hole_open: false,
-            peer_route: None,
-            peer_received_at: Instant::now(),
-            wait_for_hole_open_addr: None,
-        };
-        WorkerBuilder::new(worker)
-            .with_mailboxes(Mailboxes::new(main_mailbox, vec![local_mailbox]))
+        let heartbeat_mailbox = Mailbox::new(
+            addresses.heartbeat_address().clone(),
+            Arc::new(AllowAll),
+            Arc::new(DenyAll),
+        );
+
+        let (notify_hole_open_sender, notify_hole_open_receiver) = broadcast::channel(1);
+        let hole_open = Arc::new(RwLock::new(false));
+
+        let sender_worker =
+            UdpHolePunchSenderWorker::new(notify_hole_open_sender.subscribe(), hole_open.clone());
+
+        WorkerBuilder::new(sender_worker)
+            .with_address(addresses.sender_address().clone())
+            .with_outgoing_access_control(AllowAll)
+            .with_incoming_access_control(AllowAll)
             .start(ctx)
             .await?;
 
-        Ok((main_addr, local_addr))
+        // Create and start worker
+        let worker = Self {
+            addresses: addresses.clone(),
+            heartbeat,
+            udp_sender_address: bind.sender_address().clone(),
+            rendezvous_route,
+            this_puncher_name: String::from(this_puncher_name),
+            peer_puncher_name: String::from(peer_puncher_name),
+            hole_open: Arc::new(RwLock::new(false)),
+            notify_hole_open_sender,
+            peer_route: None,
+            peer_received_at: Instant::now(),
+        };
+        WorkerBuilder::new(worker)
+            .with_mailboxes(Mailboxes::new(
+                remote_mailbox,
+                vec![receiver_mailbox, heartbeat_mailbox],
+            ))
+            .start(ctx)
+            .await?;
+
+        Ok((addresses, notify_hole_open_receiver))
     }
 
     /// Update state to show the hole to peer is now open
-    async fn set_hole_open(&mut self, ctx: &Context) -> Result<()> {
-        self.hole_open = true;
+    async fn set_hole_open(&mut self) -> Result<()> {
+        *self.hole_open.write().unwrap() = true;
 
-        // Inform handle, if needed
-        let addr = self.wait_for_hole_open_addr.take();
-        if let Some(a) = addr {
-            trace!("Informing handle of hole opened to peer");
-            ctx.send(a, ()).await?;
-        }
+        let peer_route = if let Some(peer_route) = self.peer_route.clone() {
+            debug!("Hole open. Address={}", peer_route);
+            peer_route
+        } else {
+            return Err(Error::new(
+                Origin::Transport,
+                Kind::Internal,
+                "Hole is open but peer_route is empty",
+            ))?;
+        };
+
+        // Inform subscribers, ignore error
+        let _ = self.notify_hole_open_sender.send(peer_route);
+
         Ok(())
     }
 
@@ -214,61 +278,70 @@ impl UdpHolePunchWorker {
         msg: Routed<Any>,
         return_route: &Route,
     ) -> Result<()> {
-        debug!(
-            "Peer => Puncher: {:?}, {:?}",
-            PunchMessage::decode(msg.payload())?,
-            msg.local_message(),
-        );
+        let msg = PunchMessage::decode(msg.payload())?;
+        debug!("Peer => Puncher: {:?}", msg);
 
         // Record contact with peer
         self.peer_received_at = Instant::now();
 
         // Handle message
-        let inner_msg = PunchMessage::decode(msg.payload())?;
-        match inner_msg {
+        match msg {
             PunchMessage::Ping => {
-                trace!("Received Ping from peer. Will Pong.");
-                ctx.send(return_route.clone(), PunchMessage::Pong).await?;
+                debug!("Received Ping from peer. Will Pong.");
+                ctx.send_from_address(
+                    return_route.clone(),
+                    PunchMessage::Pong,
+                    self.addresses.remote_address().clone(),
+                )
+                .await?;
             }
             PunchMessage::Pong => {
-                trace!("Received Pong from peer. Setting as hole is open");
-                self.set_hole_open(ctx).await?;
+                debug!("Received Pong from peer. Setting as hole is open");
+                self.set_hole_open().await?;
             }
-            PunchMessage::Payload(data) => {
+            PunchMessage::Payload {
+                onward_route,
+                mut return_route,
+                payload,
+            } => {
                 trace!("Received Payload from peer. Will forward to local entity");
-                debug!("Puncher => App: {:?}", msg);
+
+                let return_route = return_route
+                    .modify()
+                    .prepend(self.addresses.sender_address().clone())
+                    .into();
 
                 // Update routing & payload
-                let mut local_message = msg.into_local_message();
-                local_message = local_message
-                    .step_forward(&self.local_addr)?
-                    .set_payload(data);
+                let local_message = LocalMessage::new()
+                    .with_onward_route(onward_route)
+                    .with_return_route(return_route)
+                    .with_payload(payload);
 
                 // Forward
-                ctx.forward(local_message).await?;
+                ctx.forward_from_address(local_message, self.addresses.receiver_address().clone())
+                    .await?;
             }
-            _ => return Err(PunchError::Internal)?,
         }
         Ok(())
     }
 
     /// Handle heartbeat messages
-    async fn handle_heartbeat(&mut self, ctx: &mut Context) -> Result<()> {
+    async fn handle_heartbeat_impl(&mut self, ctx: &mut Context) -> Result<()> {
         debug!(
             "Heartbeat => Puncher: hole_open = {:?}, peer_route = {:?}",
             self.hole_open, self.peer_route
         );
 
-        // Schedule next heartbeat here in case something below errors
-        self.heartbeat.schedule(HEARTBEAT_EVERY).await?;
+        let mut hole_open = *self.hole_open.read().unwrap();
 
         // If we have not heard from peer for a while, consider hole as closed
-        if self.hole_open && self.peer_received_at.elapsed() >= HOLE_OPEN_TIMEOUT {
+        if hole_open && self.peer_received_at.elapsed() >= HOLE_OPEN_TIMEOUT {
             trace!("Not heard from peer for a while. Setting as hole closed.",);
-            self.hole_open = false;
+            *self.hole_open.write().unwrap() = false;
+            hole_open = false;
         }
 
-        if !self.hole_open {
+        if !hole_open {
             // Attempt hole open if it is closed
             trace!("Hole closed. Will attempt to open hole to peer");
 
@@ -280,50 +353,51 @@ impl UdpHolePunchWorker {
                 self.peer_route = Some(peer_route.clone());
 
                 // Ping peer
-                ctx.send(peer_route.clone(), PunchMessage::Ping).await?;
+                ctx.send_from_address(
+                    peer_route.clone(),
+                    PunchMessage::Ping,
+                    self.addresses.remote_address().clone(),
+                )
+                .await?;
             }
         } else {
             // Do keepalive pings to try and keep the hole open
-            if let Some(peer_route) = self.peer_route.as_ref() {
-                trace!("Pinging peer for keepalive");
-                ctx.send(peer_route.clone(), PunchMessage::Ping).await?;
-            }
+            let peer_route = if let Some(peer_route) = self.peer_route.as_ref() {
+                peer_route.clone()
+            } else {
+                error!("UDP hole is open but peer_route is unknown");
+                return Err(Error::new(
+                    Origin::Transport,
+                    Kind::Internal,
+                    "UDP hole is open but peer_route is unknown",
+                ));
+            };
+
+            trace!("Pinging peer for keepalive");
+            ctx.send_from_address(
+                peer_route.clone(),
+                PunchMessage::Ping,
+                self.addresses.remote_address().clone(),
+            )
+            .await?;
         }
 
         Ok(())
     }
 
-    /// Handle messages from local entities
-    async fn handle_local(&mut self, ctx: &mut Context, msg: Routed<Any>) -> Result<()> {
-        debug!("Local => Puncher: {:?}", msg);
+    /// Handle heartbeat messages
+    async fn handle_heartbeat(&mut self, ctx: &mut Context) -> Result<()> {
+        debug!(
+            "Heartbeat => Puncher: hole_open = {:?}, peer_route = {:?}",
+            self.hole_open, self.peer_route
+        );
 
-        if let Some(peer_route) = self.peer_route.as_ref() {
-            let mut local_message = msg.into_local_message();
-            debug!("App => Puncher: {:?}", local_message);
+        let res = self.handle_heartbeat_impl(ctx).await;
 
-            // Update routing
-            local_message = local_message.pop_front_onward_route()?;
-            local_message = if !local_message
-                .onward_route_ref()
-                .contains_route(peer_route)?
-            {
-                local_message.prepend_front_onward_route(peer_route)
-            } else {
-                local_message
-            };
-            // Wrap payload
-            let wrapped_payload =
-                PunchMessage::Payload(local_message.payload_ref().to_vec()).encode()?;
-            local_message = local_message
-                .push_front_return_route(&self.main_addr)
-                .set_payload(wrapped_payload);
+        // Schedule next heartbeat here in case something errors
+        self.heartbeat.schedule(HEARTBEAT_EVERY).await?;
 
-            // Forward
-            debug!("Puncher => Peer: {:?}", local_message);
-            ctx.forward(local_message).await
-        } else {
-            Err(PunchError::HoleNotOpen)?
-        }
+        res
     }
 }
 
@@ -333,11 +407,18 @@ impl Worker for UdpHolePunchWorker {
     type Context = Context;
 
     async fn initialize(&mut self, _context: &mut Self::Context) -> Result<()> {
-        self.heartbeat.schedule(Duration::ZERO).await
+        self.heartbeat.schedule(Duration::ZERO).await?;
+
+        Ok(())
     }
 
-    async fn shutdown(&mut self, _context: &mut Self::Context) -> Result<()> {
+    async fn shutdown(&mut self, ctx: &mut Self::Context) -> Result<()> {
         self.heartbeat.cancel();
+
+        _ = ctx
+            .stop_processor(self.addresses.sender_address().clone())
+            .await;
+
         Ok(())
     }
 
@@ -347,38 +428,16 @@ impl Worker for UdpHolePunchWorker {
         msg: Routed<Self::Message>,
     ) -> Result<()> {
         match msg.msg_addr() {
-            // 'main' mailbox
-            addr if addr == self.main_addr => {
+            // 'remote' mailbox
+            addr if &addr == self.addresses.remote_address() => {
                 let return_route = msg.return_route();
-                let sender_addr = msg.sender()?;
-                let is_from_peer = match &self.peer_route {
-                    Some(r) => return_route.contains_route(r)?,
-                    None => false,
-                };
 
-                // Handle message depending on if it's from peer,
-                // heartbeat or our handle
-                if is_from_peer {
-                    self.handle_peer(ctx, msg, &return_route).await?;
-                } else if sender_addr == self.heartbeat.address() {
-                    self.handle_heartbeat(ctx).await?;
-                } else if sender_addr == self.handle_addr {
-                    let inner_msg = PunchMessage::decode(msg.payload())?;
-                    match inner_msg {
-                        PunchMessage::WaitForHoleOpen => {
-                            self.wait_for_hole_open_addr = Some(sender_addr)
-                            // TODO: If the hole is already open, the handle
-                            // will not be informed until it's closed and
-                            // opened again. Is this what we want?
-                        }
-                        _ => return Err(PunchError::Internal)?,
-                    }
-                }
+                self.handle_peer(ctx, msg, &return_route).await?;
             }
 
-            // 'local' mailbox
-            addr if addr == self.local_addr => {
-                self.handle_local(ctx, msg).await?;
+            // 'heartbeat' mailbox
+            addr if &addr == self.addresses.heartbeat_address() => {
+                self.handle_heartbeat(ctx).await?;
             }
 
             _ => return Err(PunchError::Internal)?,
