@@ -1,5 +1,5 @@
 use minicbor::{Decode, Encode};
-use ockam_core::{Decodable, Encodable, Encoded, Message, Result, Route};
+use ockam_core::{Decodable, Encodable, Encoded, Message, Result};
 
 // TODO: Change this Request/Response protocol to use CBOR encoding for messages.
 
@@ -7,22 +7,10 @@ use ockam_core::{Decodable, Encodable, Encoded, Message, Result, Route};
 #[derive(Encode, Decode, Debug)]
 #[rustfmt::skip]
 pub enum RendezvousRequest {
-    /// Update service's internal table with the
-    /// details of the sending node.
-    #[n(0)] Update {
-        /// Name of sending node's puncher
-        #[n(0)] puncher_name: String,
-    },
-    /// Query service's internal table for the public
-    /// route to the named node.
-    #[n(1)] Query {
-        /// Name of puncher to lookup
-        #[n(0)] puncher_name: String,
-    },
     /// Ping service to see if it is reachable and working.
-    #[n(2)] Ping,
+    #[n(0)] Ping,
     /// Get my public IP and port
-    #[n(3)] GetMyAddress,
+    #[n(1)] GetMyAddress,
 }
 
 impl Encodable for RendezvousRequest {
@@ -43,9 +31,8 @@ impl Message for RendezvousRequest {}
 #[derive(Encode, Decode, Debug)]
 #[rustfmt::skip]
 pub enum RendezvousResponse {
-    #[n(0)] Query(#[n(0)] Option<Route>),
-    #[n(1)] Pong,
-    #[n(2)] GetMyAddress(#[n(0)] String),
+    #[n(0)] Pong,
+    #[n(1)] GetMyAddress(#[n(0)] String),
 }
 
 impl Encodable for RendezvousResponse {

@@ -1,14 +1,15 @@
 use ockam_core::compat::sync::Arc;
-use ockam_core::flow_control::{FlowControlId, FlowControlOutgoingAccessControl, FlowControls};
-use ockam_core::{Address, OutgoingAccessControl, Result};
+use ockam_core::flow_control::{FlowControlId, FlowControls};
+use ockam_core::{Address, AllowAll, OutgoingAccessControl, Result};
 
-use crate::hole_puncher::Addresses;
+use crate::hole_punching::puncher::Addresses;
 use core::fmt;
 use core::fmt::Formatter;
 
 /// Options for a UDP puncture
 pub struct UdpHolePuncherOptions {
     pub(crate) flow_control_id: FlowControlId,
+    pub(crate) _spawner_flow_control_id: Option<FlowControlId>, // TODO
 }
 
 impl fmt::Debug for UdpHolePuncherOptions {
@@ -23,6 +24,7 @@ impl UdpHolePuncherOptions {
     pub fn new() -> Self {
         Self {
             flow_control_id: FlowControls::generate_flow_control_id(),
+            _spawner_flow_control_id: None,
         }
     }
 
@@ -59,14 +61,15 @@ impl UdpHolePuncherOptions {
 
     pub(crate) fn create_receiver_outgoing_access_control(
         &self,
-        flow_controls: &FlowControls,
+        _flow_controls: &FlowControls,
     ) -> Arc<dyn OutgoingAccessControl> {
-        let ac = FlowControlOutgoingAccessControl::new(
-            flow_controls,
-            self.flow_control_id.clone(),
-            None,
-        );
+        // FIXME
+        // let ac = FlowControlOutgoingAccessControl::new(
+        //     flow_controls,
+        //     self.flow_control_id.clone(),
+        //     None,
+        // );
 
-        Arc::new(ac)
+        Arc::new(AllowAll)
     }
 }

@@ -57,17 +57,14 @@ use ockam::{
     errcode::{Kind, Origin},
     workers::Echoer,
 };
-use ockam_core::{route, Error, Result};
+use ockam_core::{route, Address, Error, Result};
 use ockam_node::Context;
 use ockam_transport_udp::{
-    UdpBindArguments, UdpBindOptions, UdpHolePuncher, UdpHolePuncherOptions, UdpTransport, UDP,
+    UdpBindArguments, UdpBindOptions, UdpHolePuncher, UdpHolePuncherOptions, UdpTransport,
 };
 use rand::Rng;
 use std::ops::Range;
 use tracing::{error, info};
-
-/// Address of remote Rendezvous service
-const RENDEZVOUS: &str = "rendezvous";
 
 /// Address of Echoer service
 const ECHOER: &str = "echoer";
@@ -112,14 +109,14 @@ async fn do_main(ctx: &mut Context) -> Result<()> {
 
     ctx.start_worker(ECHOER, Echoer).await?;
 
-    let rendezvous_route = route![(UDP, rendezvous_addr), RENDEZVOUS];
     let mut puncher = UdpHolePuncher::create(
         ctx,
         &bind,
-        &this_name,
-        &that_name,
-        rendezvous_route,
+        "".to_string(),
+        Address::random_local(),
+        Address::random_local(),
         UdpHolePuncherOptions::new(),
+        false,
     )
     .await?;
     ctx.flow_controls()

@@ -1,7 +1,5 @@
-use crate::hole_puncher::message::PunchMessage;
+use crate::hole_punching::puncher::message::PunchMessage;
 use crate::PunchError;
-use ockam_core::compat::sync::Arc;
-use ockam_core::compat::sync::RwLock;
 use ockam_core::{Any, Encodable, LocalMessage, Result, Route, Routed, Worker};
 use ockam_node::Context;
 use tokio::sync::broadcast::error::RecvError;
@@ -10,15 +8,13 @@ use tracing::{debug, error};
 
 pub(crate) struct UdpHolePunchSenderWorker {
     notify_hole_open_receiver: Receiver<Route>,
-    hole_open: Arc<RwLock<bool>>,
     peer_route: Option<Route>,
 }
 
 impl UdpHolePunchSenderWorker {
-    pub fn new(notify_hole_open_receiver: Receiver<Route>, hole_open: Arc<RwLock<bool>>) -> Self {
+    pub fn new(notify_hole_open_receiver: Receiver<Route>) -> Self {
         Self {
             notify_hole_open_receiver,
-            hole_open,
             peer_route: None,
         }
     }
@@ -85,10 +81,6 @@ impl Worker for UdpHolePunchSenderWorker {
         ctx: &mut Context,
         msg: Routed<Self::Message>,
     ) -> Result<()> {
-        if !*self.hole_open.read().unwrap() {
-            self.wait_hole_open(ctx).await?;
-        }
-
         self.handle_local(ctx, msg).await?;
 
         Ok(())

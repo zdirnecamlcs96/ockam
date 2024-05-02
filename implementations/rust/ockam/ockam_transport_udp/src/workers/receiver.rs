@@ -64,6 +64,10 @@ impl Processor for UdpReceiverProcessor {
             }
         };
 
+        if msg.onward_route_ref().is_empty() {
+            return Ok(true);
+        }
+
         let return_route = RouteBuilder::default().append(self.addresses.sender_address().clone());
 
         let return_route = match &self.peer {

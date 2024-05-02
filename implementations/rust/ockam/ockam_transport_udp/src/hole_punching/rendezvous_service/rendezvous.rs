@@ -1,11 +1,10 @@
 use crate::{
-    rendezvous_service::{RendezvousRequest, RendezvousResponse},
+    hole_punching::rendezvous_service::{RendezvousRequest, RendezvousResponse},
     UDP,
 };
 use ockam_core::{async_trait, Address, Result, Route, Routed, Worker};
 use ockam_node::Context;
-use std::collections::BTreeMap;
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 /// High level management interface for UDP Rendezvous Service
 ///
@@ -48,9 +47,7 @@ impl UdpRendezvousService {
 /// from which they send UDP datagrams.
 ///
 /// Remote nodes can send requests to update and query the map.
-struct RendezvousWorker {
-    map: BTreeMap<String, Route>,
-}
+struct RendezvousWorker {}
 
 impl Default for RendezvousWorker {
     fn default() -> Self {
@@ -60,9 +57,7 @@ impl Default for RendezvousWorker {
 
 impl RendezvousWorker {
     fn new() -> Self {
-        Self {
-            map: BTreeMap::new(),
-        }
+        Self {}
     }
 
     /// Extract from `return route` everything just before we received the
@@ -89,33 +84,6 @@ impl RendezvousWorker {
     }
 
     // Handle Update request
-    fn handle_update(&mut self, puncher_name: &str, return_route: &Route) {
-        let r = Self::parse_route(return_route);
-        if !r.is_empty() {
-            debug!("Update {} route to {}", puncher_name, r);
-            self.map.insert(puncher_name.to_owned(), r);
-        } else {
-            // This could happen if a client erroneously contacts this service over TCP not UDP, for example
-            warn!(
-                "Return route has no UDP part, will not update map: {:?}",
-                return_route
-            );
-            // Ignore issue. There's no (current) way to inform sender.
-        }
-    }
-
-    // Handle Query request
-    fn handle_query(&self, puncher_name: &String) -> Option<Route> {
-        match self.map.get(puncher_name) {
-            Some(route) => {
-                debug!("Return route for {}. Which is {}", puncher_name, route);
-                Some(route.clone())
-            }
-            None => None,
-        }
-    }
-
-    // Handle Update request
     fn handle_get_my_address(&mut self, return_route: &Route) -> Option<String> {
         Self::get_udp_address(return_route).map(|a| a.address().to_string())
     }
@@ -138,14 +106,6 @@ impl Worker for RendezvousWorker {
         );
         let return_route = msg.return_route();
         match msg.into_body()? {
-            RendezvousRequest::Update { puncher_name } => {
-                self.handle_update(&puncher_name, &return_route);
-            }
-            RendezvousRequest::Query { puncher_name } => {
-                let res = self.handle_query(&puncher_name);
-                ctx.send(return_route, RendezvousResponse::Query(res))
-                    .await?;
-            }
             RendezvousRequest::Ping => {
                 ctx.send(return_route, RendezvousResponse::Pong).await?;
             }
@@ -167,7 +127,7 @@ impl Worker for RendezvousWorker {
                 }
             }
         }
-        trace!("Map: {:?}", self.map);
+
         Ok(())
     }
 }
@@ -175,7 +135,7 @@ impl Worker for RendezvousWorker {
 #[cfg(test)]
 mod tests {
     use super::RendezvousWorker;
-    use crate::rendezvous_service::{RendezvousRequest, RendezvousResponse};
+    use crate::hole_punching::rendezvous_service::{RendezvousRequest, RendezvousResponse};
     use crate::transport::common::UdpBind;
     use crate::transport::UdpBindArguments;
     use crate::{UdpBindOptions, UdpRendezvousService, UdpTransport, UDP};
@@ -206,40 +166,6 @@ mod tests {
             RendezvousWorker::parse_route(&route!["a", "b", "c", "d"])
         );
         assert_eq!(route![], RendezvousWorker::parse_route(&route![]));
-    }
-
-    #[ockam_macros::test]
-    async fn update_and_query(ctx: &mut Context) -> Result<()> {
-        let (rendezvous_route, send_addr) = test_setup(ctx).await?;
-
-        let our_public_route = route![(UDP, send_addr.to_string()), ctx.address()];
-
-        // Update service, should work
-        //
-        // Use Alice and Bob with the same address to check the service can
-        // handle multiple internal mappings and that multiple map values
-        // can be for the same node.
-        update_operation("Alice", ctx, &rendezvous_route)
-            .await
-            .unwrap();
-        update_operation("Bob", ctx, &rendezvous_route)
-            .await
-            .unwrap();
-
-        // Query service, should work
-        let res = query_operation("Alice", ctx, &rendezvous_route)
-            .await
-            .unwrap();
-        assert_eq!(res, our_public_route);
-        let res = query_operation("Bob", ctx, &rendezvous_route)
-            .await
-            .unwrap();
-        assert_eq!(res, our_public_route);
-
-        // Query service for non-existent node, should error
-        let res = query_operation("DoesNotExist", ctx, &rendezvous_route).await;
-        assert!(res.is_none(), "Query operation should have failed");
-        Ok(())
     }
 
     #[ockam_macros::test]
@@ -296,27 +222,5 @@ mod tests {
             .add_consumer("echo", udp_bind.flow_control_id());
 
         Ok((rendezvous_route, udp_bind))
-    }
-
-    /// Helper
-    async fn update_operation(puncher_name: &str, ctx: &mut Context, route: &Route) -> Result<()> {
-        let msg = RendezvousRequest::Update {
-            puncher_name: String::from(puncher_name),
-        };
-
-        // Send from our context's main address
-        ctx.send(route.clone(), msg).await
-    }
-
-    /// Helper
-    async fn query_operation(puncher_name: &str, ctx: &Context, route: &Route) -> Option<Route> {
-        let msg = RendezvousRequest::Query {
-            puncher_name: String::from(puncher_name),
-        };
-        let res: RendezvousResponse = ctx.send_and_receive(route.clone(), msg).await.unwrap();
-        match res {
-            RendezvousResponse::Query(r) => r,
-            r => panic!("Unexpected response: {:?}", r),
-        }
     }
 }

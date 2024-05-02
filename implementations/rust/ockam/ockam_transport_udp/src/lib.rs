@@ -17,16 +17,14 @@ extern crate core;
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-mod hole_puncher;
+mod hole_punching;
 mod options;
-mod rendezvous_service;
 mod transport;
 
 mod workers;
 
-pub use hole_puncher::*;
+pub use hole_punching::*;
 pub use options::UdpBindOptions;
-pub use rendezvous_service::UdpRendezvousService;
 pub use transport::UdpTransportExtension;
 pub use transport::{UdpBindArguments, UdpTransport};
 

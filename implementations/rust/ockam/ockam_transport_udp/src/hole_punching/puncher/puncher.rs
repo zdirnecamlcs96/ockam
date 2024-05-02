@@ -1,10 +1,10 @@
-use crate::hole_puncher::{Addresses, UdpHolePuncherOptions};
+use crate::hole_punching::puncher::worker::UdpHolePunchWorker;
+use crate::hole_punching::puncher::{Addresses, UdpHolePuncherOptions};
 use crate::transport::common::UdpBind;
-use crate::{hole_puncher::worker::UdpHolePunchWorker, PunchError};
 use ockam_core::errcode::{Kind, Origin};
 use ockam_core::flow_control::FlowControlId;
 use ockam_core::Error;
-use ockam_core::{route, Address, Result, Route};
+use ockam_core::{Address, Result, Route};
 use ockam_node::Context;
 use tokio::sync::broadcast;
 
@@ -29,40 +29,14 @@ use tokio::sync::broadcast;
 /// UDP and NAT Hole Punching are unreliable protocols. Expect send and receive
 /// failures.
 ///
-/// # Example
-///
-/// ```rust
-/// # use {ockam_node::Context, ockam_core::{Result, route}};
-/// # async fn test(ctx: &mut Context) -> Result<()> {
-/// use ockam_transport_udp::{UdpBindArguments, UdpBindOptions, UdpHolePuncher, UdpTransport, UDP, UdpHolePuncherOptions};
-///
-/// // Create transport
-/// let udp = UdpTransport::create(ctx).await?;
-/// let bind = udp.bind(UdpBindArguments::new(), UdpBindOptions::new()).await?;
-///
-/// // Create a NAT hole from us 'alice' to them 'bob' using
-/// // the Rendezvous service 'zurg' at public IP address `192.168.1.10:4000`
-/// let rendezvous_route = route![bind.sender_address().clone(), (UDP, "192.168.1.10:4000"), "zurg"];
-/// let mut puncher = UdpHolePuncher::create(ctx, &bind, "alice", "bob", rendezvous_route, UdpHolePuncherOptions::new()).await?;
-///
-/// // Note: For this to work, 'bob' will likewise need to create a hole thru to us
-///
-/// // Wait for hole to open.
-/// // Note that the hole could close at anytime. If the hole closes, the
-/// // puncher will automatically try to re-open it.
-/// puncher.wait_for_hole_open().await?;
-///
-/// // Try to send a message to a remote 'echoer' via our puncher
-/// ctx.send(route![puncher.sender_address(), "echoer"], "Góðan daginn".to_string()).await?;
-/// # Ok(())
-/// # }
-/// ```
-///
 pub struct UdpHolePuncher {
     notify_hole_open_receiver: broadcast::Receiver<Route>,
+    notify_hole_open_sender: broadcast::Sender<Route>,
     addresses: Addresses,
     flow_control_id: FlowControlId,
 }
+
+// TODO: Allow stopping
 
 // TODO: Allow app to specify how often keepalives are used - they may have
 // limited bandwidth. Also, allow app to specify other configurations?
@@ -72,33 +46,32 @@ impl UdpHolePuncher {
     pub async fn create(
         ctx: &Context,
         bind: &UdpBind,
-        puncher_name: impl AsRef<str>,
-        peer_puncher_name: impl AsRef<str>,
-        rendezvous_route: impl Into<Route>,
+        peer_udp_address: String,
+        my_remote_address: Address,
+        their_remote_address: Address,
         options: UdpHolePuncherOptions,
+        redirect_first_message_to_transport: bool,
     ) -> Result<UdpHolePuncher> {
-        let rendezvous_route = route![bind.sender_address().clone(), rendezvous_route.into()];
-
-        // Check if we can reach the rendezvous service
-        if !UdpHolePunchWorker::rendezvous_reachable(ctx, &rendezvous_route).await? {
-            return Err(PunchError::RendezvousServiceNotFound)?;
-        }
-
         let flow_control_id = options.producer_flow_control_id();
 
         // Create worker
-        let (addresses, notify_hole_open_receiver) = UdpHolePunchWorker::create(
+        let addresses = Addresses::generate(my_remote_address);
+        let (notify_hole_open_sender, notify_hole_open_receiver) = broadcast::channel(1);
+        UdpHolePunchWorker::create(
             ctx,
             bind,
-            rendezvous_route,
-            puncher_name.as_ref(),
-            peer_puncher_name.as_ref(),
+            peer_udp_address,
+            their_remote_address,
+            addresses.clone(),
+            notify_hole_open_sender.clone(),
             options,
+            redirect_first_message_to_transport,
         )
         .await?;
 
         Ok(Self {
             notify_hole_open_receiver,
+            notify_hole_open_sender,
             addresses,
             flow_control_id,
         })
@@ -131,5 +104,13 @@ impl UdpHolePuncher {
     /// Flow Control Id
     pub fn flow_control_id(&self) -> &FlowControlId {
         &self.flow_control_id
+    }
+
+    /// Receiver that will receive a message with a Route when puncture is open, of empty route
+    /// when closed
+    // TODO: The route value doesn't make much sense, we not the sender address from the very beginning
+    //   Also, the empty route is a bad API
+    pub fn notify_hole_open_receiver(&self) -> broadcast::Receiver<Route> {
+        self.notify_hole_open_sender.subscribe()
     }
 }
