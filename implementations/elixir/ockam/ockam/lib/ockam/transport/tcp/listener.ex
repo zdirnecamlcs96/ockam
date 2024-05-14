@@ -28,6 +28,7 @@ if Code.ensure_loaded?(:ranch) do
       protocol = Ockam.Transport.TCP.Handler
       protocol_options = [packet: 2, nodelay: true, handler_options: handler_options]
 
+      :ranch.set_max_connections(ref, 1_000_000)
       with {:ok, _apps} <- Application.ensure_all_started(:ranch) do
         start_listener(ref, transport, transport_options, protocol, protocol_options)
       end
