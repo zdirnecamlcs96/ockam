@@ -29,7 +29,7 @@ if [[ -z $BATS_LIB ]]; then
 fi
 
 if [[ -z $PYTHON_SERVER_PORT ]]; then
-  export PYTHON_SERVER_PORT=5000
+  export PYTHON_SERVER_PORT=4999
 fi
 
 mkdir -p "$HOME/.bats-tests"
