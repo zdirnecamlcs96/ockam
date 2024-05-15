@@ -1,5 +1,8 @@
 use tracing::{debug, warn};
 
+use crate::models::DurationInSeconds;
+use crate::utils::now;
+use crate::TimestampInSeconds;
 use ockam_core::compat::collections::HashMap;
 use ockam_core::compat::sync::Arc;
 use ockam_core::compat::uuid::Uuid;
@@ -8,6 +11,10 @@ use ockam_core::errcode::{Kind, Origin};
 use ockam_core::Error;
 use ockam_core::{Result, Route};
 use ockam_node::compat::asynchronous::RwLock;
+
+/// If more that MAX_PAYLOAD_PART_UPDATE has elapsed between an update and the one before
+/// We consider that the message will never be completed and we drop all the parts
+const MAX_PAYLOAD_PART_UPDATE: DurationInSeconds = DurationInSeconds(60);
 
 /// The PayloadCollector stores payload parts that can be possibly received out of order.
 ///
@@ -57,7 +64,7 @@ impl PayloadCollector {
         // We temporarily remove the list of tracked parts for the UUID.
         // We add it back later if the list is still incomplete.
         // There might be a better way where all the updates are done in place.
-        match all_parts.remove(&payload_uuid) {
+        let result = match all_parts.remove(&payload_uuid) {
             Some(mut payload_parts) => {
                 payload_parts.validate(
                     onward_route,
@@ -71,7 +78,7 @@ impl PayloadCollector {
                     debug!("The payload for message {payload_uuid} is now complete");
                     Ok(Some(message))
                 } else {
-                    let parts_number = payload_parts.update(current_part_number, payload);
+                    let parts_number = payload_parts.update(current_part_number, payload)?;
                     all_parts.insert(payload_uuid, payload_parts);
                     debug!("The payload for message {payload_uuid} is not yet complete, received {} parts/{total_number_of_parts}", parts_number);
                     Ok(None)
@@ -91,14 +98,19 @@ impl PayloadCollector {
                         onward_route,
                         return_route,
                         total_number_of_parts,
-                    );
-                    payloads_parts.update(current_part_number, payload);
+                    )?;
+                    payloads_parts.update(current_part_number, payload)?;
                     all_parts.insert(payload_uuid, payloads_parts);
                     debug!("Storing the first part of the payload for message {payload_uuid}: {current_part_number}/{total_number_of_parts}");
                     Ok(None)
                 }
             }
-        }
+        };
+
+        // Keep only the payload parts that have been recently updated
+        let now = now()?;
+        all_parts.retain(|_, parts| parts.last_update.add(MAX_PAYLOAD_PART_UPDATE) >= now);
+        result
     }
 
     /// Return the current number of payloads being tracked
@@ -116,6 +128,7 @@ struct PayloadParts {
     onward_route: Route,
     return_route: Route,
     expected_total_number_of_parts: u32,
+    last_update: TimestampInSeconds,
 }
 
 impl PayloadParts {
@@ -125,14 +138,15 @@ impl PayloadParts {
         onward_route: &Route,
         return_route: &Route,
         expected_total_number: u32,
-    ) -> PayloadParts {
-        PayloadParts {
+    ) -> Result<PayloadParts> {
+        Ok(PayloadParts {
             uuid: *uuid,
             parts: HashMap::new(),
             onward_route: onward_route.clone(),
             return_route: return_route.clone(),
             expected_total_number_of_parts: expected_total_number,
-        }
+            last_update: now()?,
+        })
     }
 
     /// Validate a newly received payload part, to make sure that its data is consistent with the
@@ -169,9 +183,10 @@ impl PayloadParts {
 
     /// Accept the new part and add it with the other parts
     /// Return the current number of parts
-    fn update(&mut self, current_payload_number: u32, payload: Vec<u8>) -> usize {
+    fn update(&mut self, current_payload_number: u32, payload: Vec<u8>) -> Result<usize> {
         self.parts.insert(current_payload_number, payload);
-        self.parts.len()
+        self.last_update = now()?;
+        Ok(self.parts.len())
     }
 
     /// Check the current payload part would make the full payload complete
@@ -208,7 +223,8 @@ mod tests {
         // In this test we expect to receive 3 parts. The received order is 2, 3, 1
 
         // Receiving the first part
-        let mut payload_parts = PayloadParts::new(&uuid, &route!["onward"], &route!["return"], 3);
+        let mut payload_parts =
+            PayloadParts::new(&uuid, &route!["onward"], &route!["return"], 3).unwrap();
         assert!(
             payload_parts
                 .validate(&route!["onward"], &route!["return"], 2, 3)
@@ -216,7 +232,9 @@ mod tests {
             "the first part is validated"
         );
         // update the list
-        payload_parts.update(2, "second".as_bytes().to_vec());
+        payload_parts
+            .update(2, "second".as_bytes().to_vec())
+            .unwrap();
 
         // validate other parts that would be incorrect
         assert!(
@@ -246,7 +264,9 @@ mod tests {
             "the third part is validated"
         );
         assert!(!payload_parts.is_complete_with(3));
-        let parts_number = payload_parts.update(3, "third".as_bytes().to_vec());
+        let parts_number = payload_parts
+            .update(3, "third".as_bytes().to_vec())
+            .unwrap();
         assert_eq!(parts_number, 2);
 
         // receive the 1st part to complete the payload
